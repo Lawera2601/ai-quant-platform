@@ -1,0 +1,28 @@
+from typing import Optional
+
+from sqlalchemy import BIGINT, DateTime, Index, Integer, JSON, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from backend.app.db.base import Base
+
+
+class AIAnalysis(Base):
+    __tablename__ = "ai_analysis"
+    __table_args__ = (
+        Index("idx_ai_stock", "stock_code"),
+        Index("idx_ai_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(10), nullable=False)
+    quant_score: Mapped[Optional[int]] = mapped_column(Integer)
+    trend: Mapped[Optional[str]] = mapped_column(String(50))
+    summary: Mapped[Optional[str]] = mapped_column(Text)
+    technical_analysis: Mapped[Optional[str]] = mapped_column(Text)
+    quant_analysis: Mapped[Optional[str]] = mapped_column(Text)
+    news_analysis: Mapped[Optional[str]] = mapped_column(Text)
+    advantages: Mapped[Optional[list]] = mapped_column(JSON)
+    risks: Mapped[Optional[list]] = mapped_column(JSON)
+    conclusion: Mapped[Optional[str]] = mapped_column(Text)
+    model_name: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[object] = mapped_column(DateTime, server_default=func.now())

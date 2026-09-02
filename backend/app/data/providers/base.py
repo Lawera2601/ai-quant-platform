@@ -20,6 +20,10 @@ class StockDataSchemaError(StockDataProviderError):
     """Raised when the data source schema is unexpected."""
 
 
+class InsufficientStockDataError(StockDataProviderError):
+    """Raised when the data source returns fewer rows than the caller requires."""
+
+
 class StockDataProvider(ABC):
     @abstractmethod
     def get_daily_kline(

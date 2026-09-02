@@ -98,8 +98,9 @@ V1 固定使用前复权 `qfq`。
 
 ### 数据契约（量化模块输入要求）
 
-- 固定 `qfq` 日线；字段统一 `snake_case`；百分比用小数（`0.0125` = 1.25%）。
-- **数据量保证**：接口适配层（`StockService`）保证返回**至少 60 行**（`DEFAULT_MIN_KLINE_ROWS`）。请求窗口不足时自动向前扩窗；仍不足则返回错误码 `40003`（insufficient stock data）。
+- 固定 `qfq` 日线；字段统一 `snake_case`；百分比用小数（`0.0125` = 1.25%）；`period` 仅支持 `daily`。
+- **数据量保证**：接口适配层（`StockService`）保证返回**至少 60 行清洗后的有效数据**（`DEFAULT_MIN_KLINE_ROWS`）。请求窗口不足时自动向前扩窗（首次空数据也继续扩窗）；扩窗后仍不足则返回业务错误码 `40003`（insufficient stock data）。
+- **清洗校验规则**：日期唯一且升序、必需数值列有限、`volume ≥ 0`、OHLC 合法（`high ≥ open/close`、`low ≤ open/close`、`high ≥ low`）。
 - 日期 `YYYY-MM-DD`；股票代码 6 位字符串。
 
 返回字段：

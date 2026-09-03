@@ -89,9 +89,12 @@ class AKShareStockProvider(StockDataProvider):
         if code_col is None or name_col is None:
             raise StockDataSchemaError("AKShare spot response missing code/name columns")
 
-        mask = raw[code_col].astype(str).str.contains(keyword, case=False, na=False) | raw[
-            name_col
-        ].astype(str).str.contains(keyword, case=False, na=False)
+        mask = raw[code_col].astype(str).str.contains(
+            keyword, case=False, na=False, regex=False
+        ) | raw[name_col].astype(str).str.contains(
+            keyword, case=False, na=False, regex=False
+        )
+        subset = raw.loc[mask, [code_col, name_col]].head(50)
         subset = raw.loc[mask, [code_col, name_col]].head(50)
 
         result: List[Dict[str, str]] = []

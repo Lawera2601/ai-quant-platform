@@ -95,7 +95,6 @@ class AKShareStockProvider(StockDataProvider):
             keyword, case=False, na=False, regex=False
         )
         subset = raw.loc[mask, [code_col, name_col]].head(50)
-        subset = raw.loc[mask, [code_col, name_col]].head(50)
 
         result: List[Dict[str, str]] = []
         for _, row in subset.iterrows():

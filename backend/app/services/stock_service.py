@@ -59,6 +59,17 @@ class StockService:
         end_date: Optional[date] = None,
         min_rows: int = DEFAULT_MIN_KLINE_ROWS,
     ) -> List[DailyKlineSchema]:
+        frame = self.get_daily_kline_frame(stock_code, start_date, end_date, min_rows)
+        return [DailyKlineSchema(**row) for row in frame.to_dict("records")]
+
+    def get_daily_kline_frame(
+        self,
+        stock_code: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        min_rows: int = DEFAULT_MIN_KLINE_ROWS,
+    ) -> pd.DataFrame:
+        """Return the cleaned qfq daily K-line as a DataFrame (>= ``min_rows`` rows)."""
         end_date = end_date or date.today()
         start_date = start_date or (end_date - timedelta(days=DEFAULT_WINDOW_DAYS))
         hard_start = end_date - timedelta(days=MAX_FETCH_YEARS * 366)
@@ -74,7 +85,7 @@ class StockService:
                 f"at least {min_rows} required"
             )
 
-        return [DailyKlineSchema(**row) for row in frame.to_dict("records")]
+        return frame
 
     def _fetch_and_clean(self, stock_code: str, start_date: date, end_date: date) -> pd.DataFrame:
         try:

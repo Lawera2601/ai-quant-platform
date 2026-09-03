@@ -131,7 +131,7 @@ V1 固定使用前复权 `qfq`。
 GET /api/v1/stocks/{stock_code}/indicators
 ```
 
-返回字段包括 `trade_date`、`ma5`、`ma10`、`ma20`、`ma60`、`macd`、`macd_signal`、`macd_hist`、`rsi14`、`boll_upper`、`boll_middle`、`boll_lower`。
+返回为**指标序列数组**（按 `trade_date` 升序），每项字段包括 `trade_date`、`ma5`、`ma10`、`ma20`、`ma60`、`macd`、`macd_signal`、`macd_hist`、`rsi14`、`boll_upper`、`boll_middle`、`boll_lower`。计算由 C 的量化模块提供，B 仅在 FastAPI 层包装。
 
 ## 7. 量化评分
 
@@ -145,10 +145,19 @@ GET /api/v1/stocks/{stock_code}/score
 
 ```http
 POST /api/v1/backtests
-GET  /api/v1/backtests/{backtest_id}
 ```
 
-创建回测可返回 `equity_curve`。注意：`docs/DATABASE_DESIGN.md` 明确 V1 暂不持久化 `equity_curve`，因此按 `backtest_id` 再次获取时如何提供该字段仍需团队后续确认。
+请求体（`BacktestRequest`）：
+
+```json
+{ "stock_code": "600519", "start_date": "2025-01-01", "end_date": "2026-08-31" }
+```
+
+**V1：`POST /api/v1/backtests` 直接返回完整回测结果和 `equity_curve`，前端不需要再按 `backtest_id` 查询。** `GET /backtests/{id}` 待曲线持久化方案确定后再完善。
+
+- `equity_curve` 固定为 `[{ "trade_date": "YYYY-MM-DD", "equity": 100000.0 }]`，不使用 `value/date/nav` 字段。
+- `equity` 表示**账户绝对权益**，默认从 `initial_cash=100000.0` 起；归一化净值 = `equity / initial_cash`，累计收益率 = `equity / initial_cash - 1`。
+- 响应同时返回 `stock_code`、`initial_cash`、`final_equity`、`total_return`。计算由 C 的量化模块提供，B 仅在 FastAPI 层包装。
 
 ## 9. AI 综合分析
 

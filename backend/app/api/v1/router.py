@@ -4,10 +4,12 @@ from backend.app.schemas.common import ApiResponse
 from backend.app.schemas.health import HealthData
 from backend.app.api.v1.ai_analysis import router as ai_analysis_router
 from backend.app.api.v1.stocks import router as stocks_router
+from backend.app.api.v1.quant import router as quant_router
 
 api_router = APIRouter()
 api_router.include_router(ai_analysis_router)
 api_router.include_router(stocks_router)
+api_router.include_router(quant_router)
 
 
 @api_router.get("/health", response_model=ApiResponse[HealthData])

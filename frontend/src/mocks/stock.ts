@@ -150,25 +150,36 @@ export function mockScore(stockCode: string): ApiResponse<ScoreData> {
 
 export function mockBacktest(stockCode: string): ApiResponse<BacktestData> {
   const kline = buildKline(180, 20260902, 1350)
-  const first = kline[0].close
+  const initialCash = 100000
+  // 模拟简单策略：价格涨跌驱动权益，100000 起步的绝对权益
+  let equity = initialCash
+  const equityCurve = kline.map((row, index) => {
+    const prevClose = index > 0 ? kline[index - 1].close : row.close
+    equity *= row.close / prevClose
+    return {
+      trade_date: row.trade_date,
+      equity: Number(equity.toFixed(2)),
+    }
+  })
+  const finalEquity = equityCurve[equityCurve.length - 1].equity
   return {
     code: 0,
     message: 'success',
     data: {
       backtest_id: `mock-${stockCode}`,
       stock_code: stockCode,
+      initial_cash: initialCash,
+      final_equity: finalEquity,
+      total_return: Number((finalEquity / initialCash - 1).toFixed(4)),
       metrics: {
-        total_return: 0.153,
+        total_return: Number((finalEquity / initialCash - 1).toFixed(4)),
         annual_return: 0.21,
         max_drawdown: -0.12,
         sharpe: 1.36,
         win_rate: 0.54,
         trade_count: 23,
       },
-      equity_curve: kline.map((row) => ({
-        trade_date: row.trade_date,
-        value: Number((row.close / first).toFixed(4)),
-      })),
+      equity_curve: equityCurve,
     },
   }
 }

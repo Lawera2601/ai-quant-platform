@@ -40,7 +40,14 @@ function metricClass(value: number): string {
 const chartEl = ref<HTMLElement | null>(null)
 let chart: echarts.ECharts | null = null
 
-const curve = computed(() => props.data.equity_curve ?? [])
+// equity 是绝对权益（initial_cash 起步），展示统一换算为累计收益率
+const curve = computed(() => {
+  const cash = props.data.initial_cash
+  return (props.data.equity_curve ?? []).map((point) => ({
+    trade_date: point.trade_date,
+    ret: cash ? point.equity / cash - 1 : 0,
+  }))
+})
 
 function render() {
   if (!chart) return
@@ -77,7 +84,7 @@ function render() {
         {
           name: '净值曲线',
           type: 'line',
-          data: curve.value.map((point) => point.value),
+          data: curve.value.map((point) => point.ret),
           symbol: 'none',
           lineStyle: { width: 1.5, color: '#d4a958' },
           itemStyle: { color: '#d4a958' },

@@ -73,10 +73,13 @@ export interface AIAnalysisData {
   model_name: string
 }
 
-// POST /backtests（SPEC 未定死字段，equity_curve 待团队确认，先保留最小结构）
+// POST /backtests（字段口径已经 C 确认：equity 为账户绝对权益，initial_cash 起步）
 export interface BacktestData {
   backtest_id: string
   stock_code: string
+  initial_cash: number
+  final_equity: number
+  total_return: number
   metrics: Record<string, number>
-  equity_curve?: Array<{ trade_date: string; value: number }>
+  equity_curve?: Array<{ trade_date: string; equity: number }>
 }

@@ -46,9 +46,15 @@ http.interceptors.response.use(
   (error) => {
     if (!error?.config?.skipErrorHandler) {
       const status = error?.response?.status
-      showErrorMessage(
-        status ? `请求失败（HTTP ${status}）` : '网络错误，请检查后端服务是否启动',
-      )
+      // 非 2xx 也可能携带 ApiResponse 业务文案（如 422 + body.code=40003），优先展示
+      const bodyMessage: unknown = error?.response?.data?.message
+      if (typeof bodyMessage === 'string' && bodyMessage) {
+        showErrorMessage(bodyMessage)
+      } else {
+        showErrorMessage(
+          status ? `请求失败（HTTP ${status}）` : '网络错误，请检查后端服务是否启动',
+        )
+      }
     }
     return Promise.reject(error)
   },

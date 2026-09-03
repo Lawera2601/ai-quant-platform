@@ -106,21 +106,27 @@ export function mockIndicators(): ApiResponse<IndicatorsItem[]> {
   const kline = buildKline(180, 20260902, 1350)
   const data: IndicatorsItem[] = kline.map((row, index) => {
     const closes = kline.slice(0, index + 1).map((item) => item.close)
-    const ma20 = average(closes, Math.min(20, closes.length))
-    const std = stdDev(closes.slice(-20)) || 1
+    const n = closes.length
+    const ready = (window: number) => n >= window
+    // 模拟预热期：窗口未满时指标为 null，与 C 的真实实现一致
+    const ma20 = ready(20) ? average(closes, 20) : null
+    const std = ready(20) ? stdDev(closes.slice(-20)) || 1 : null
     return {
       trade_date: row.trade_date,
-      ma5: round2(average(closes, Math.min(5, closes.length))),
-      ma10: round2(average(closes, Math.min(10, closes.length))),
-      ma20: round2(ma20),
-      ma60: round2(average(closes, Math.min(60, closes.length))),
-      macd: Number(((row.close - ma20) / 8).toFixed(3)),
-      macd_signal: Number(((row.close - ma20) / 10).toFixed(3)),
-      macd_hist: Number(((row.close - ma20) / 40).toFixed(3)),
-      rsi14: Number((35 + std * 2).toFixed(2)),
-      boll_upper: round2(ma20 + 2 * std),
-      boll_middle: round2(ma20),
-      boll_lower: round2(ma20 - 2 * std),
+      ma5: ready(5) ? round2(average(closes, 5)) : null,
+      ma10: ready(10) ? round2(average(closes, 10)) : null,
+      ma20: ma20 != null ? round2(ma20) : null,
+      ma60: ready(60) ? round2(average(closes, 60)) : null,
+      // MACD 实际预热约 33 天（EMA12 + EMA26 + DEA9），mock 用 34 天近似
+      macd: ready(34) && ma20 != null ? Number(((row.close - ma20) / 8).toFixed(3)) : null,
+      macd_signal:
+        ready(34) && ma20 != null ? Number(((row.close - ma20) / 10).toFixed(3)) : null,
+      macd_hist:
+        ready(34) && ma20 != null ? Number(((row.close - ma20) / 40).toFixed(3)) : null,
+      rsi14: ready(15) ? Number((35 + (std ?? 1) * 2).toFixed(2)) : null,
+      boll_upper: ma20 != null && std != null ? round2(ma20 + 2 * std) : null,
+      boll_middle: ma20 != null ? round2(ma20) : null,
+      boll_lower: ma20 != null && std != null ? round2(ma20 - 2 * std) : null,
     }
   })
   return { code: 0, message: 'success', data }
@@ -137,7 +143,7 @@ export function mockScore(stockCode: string): ApiResponse<ScoreData> {
       momentum_score: 18,
       volume_score: 12,
       risk_score: 12,
-      level: 'B',
+      level: '技术面偏强',
       reasons: [
         '价格站上 MA20，短期趋势偏多',
         'RSI14 处于中性区间，未超买',
@@ -166,19 +172,15 @@ export function mockBacktest(stockCode: string): ApiResponse<BacktestData> {
     code: 0,
     message: 'success',
     data: {
-      backtest_id: `mock-${stockCode}`,
       stock_code: stockCode,
       initial_cash: initialCash,
       final_equity: finalEquity,
       total_return: Number((finalEquity / initialCash - 1).toFixed(4)),
-      metrics: {
-        total_return: Number((finalEquity / initialCash - 1).toFixed(4)),
-        annual_return: 0.21,
-        max_drawdown: -0.12,
-        sharpe: 1.36,
-        win_rate: 0.54,
-        trade_count: 23,
-      },
+      annual_return: 0.21,
+      max_drawdown: -0.12,
+      sharpe_ratio: 1.36,
+      win_rate: 0.54,
+      trade_count: 23,
       equity_curve: equityCurve,
     },
   }

@@ -37,15 +37,17 @@ const changeClass = computed(() =>
 async function load() {
   if (!stockCode.value) return
   loading.value = true
+  loaded.value = false
+  kline.value = []
+  indicators.value = []
   try {
-    // kline/indicators 已有后端契约；score/backtests 暂走 mock（VITE_USE_MOCK）
-    const [klineRes, indicatorRes] = await Promise.all([
-      fetchKline(stockCode.value),
-      fetchIndicators(stockCode.value),
-    ])
+    // K 线是主请求；指标失败只降级（图上不画 MA/MACD），不影响 K 线展示
+    const klineRes = await fetchKline(stockCode.value)
     kline.value = klineRes.data
-    indicators.value = indicatorRes.data
     loaded.value = true
+    fetchIndicators(stockCode.value)
+      .then((res) => (indicators.value = res.data))
+      .catch(() => undefined)
   } catch {
     // 拦截器已统一弹错误提示
   } finally {

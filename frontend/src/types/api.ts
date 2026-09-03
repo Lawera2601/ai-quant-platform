@@ -28,20 +28,20 @@ export interface KlineItem {
   change_pct: number
 }
 
-// GET /stocks/{stock_code}/indicators
+// GET /stocks/{stock_code}/indicators（指标存在预热期，未满窗口时后端返回 null）
 export interface IndicatorsItem {
   trade_date: string
-  ma5: number
-  ma10: number
-  ma20: number
-  ma60: number
-  macd: number
-  macd_signal: number
-  macd_hist: number
-  rsi14: number
-  boll_upper: number
-  boll_middle: number
-  boll_lower: number
+  ma5: number | null
+  ma10: number | null
+  ma20: number | null
+  ma60: number | null
+  macd: number | null
+  macd_signal: number | null
+  macd_hist: number | null
+  rsi14: number | null
+  boll_upper: number | null
+  boll_middle: number | null
+  boll_lower: number | null
 }
 
 // GET /stocks/{stock_code}/score（分项上限 40/25/20/15，总分 0-100）
@@ -73,13 +73,17 @@ export interface AIAnalysisData {
   model_name: string
 }
 
-// POST /backtests（字段口径已经 C 确认：equity 为账户绝对权益，initial_cash 起步）
+// POST /backtests（口径已经 C 契约回归确认：指标为扁平字段；equity 为账户绝对权益，
+// initial_cash 起步；sharpe_ratio/win_rate 数据不足时为 null；equity_curve 必填）
 export interface BacktestData {
-  backtest_id: string
   stock_code: string
   initial_cash: number
   final_equity: number
   total_return: number
-  metrics: Record<string, number>
-  equity_curve?: Array<{ trade_date: string; equity: number }>
+  annual_return: number
+  max_drawdown: number
+  sharpe_ratio: number | null
+  win_rate: number | null
+  trade_count: number
+  equity_curve: Array<{ trade_date: string; equity: number }>
 }

@@ -21,17 +21,17 @@ const items = computed(() =>
   })),
 )
 
-// 等级颜色：红强、金中性、绿弱（A 股语义）
-const LEVEL_TYPE: Record<string, 'danger' | 'warning' | 'success' | 'info'> = {
-  A: 'danger',
-  B: 'warning',
-  C: 'success',
-  D: 'success',
-}
+// 等级颜色：红强、金中性、绿弱、灰更弱（A 股语义），level 为 C 定义的中文等级
+const LEVEL_RULES: Array<{ match: string; type: 'danger' | 'warning' | 'success' | 'info' }> = [
+  { match: '偏强', type: 'danger' },
+  { match: '中性', type: 'warning' },
+  { match: '偏弱', type: 'success' },
+  { match: '较弱', type: 'info' },
+]
 
 const levelType = computed(() => {
-  const key = (props.data.level ?? '').trim().charAt(0).toUpperCase()
-  return LEVEL_TYPE[key] ?? 'info'
+  const level = props.data.level ?? ''
+  return LEVEL_RULES.find((rule) => level.includes(rule.match))?.type ?? 'info'
 })
 </script>
 

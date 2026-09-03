@@ -14,7 +14,8 @@ export function useHealthStore() {
     state.error = ''
     try {
       const result = await fetchHealth()
-      state.status = result.data.status
+      // 代理返回异常体时 data 可能为空，兜底避免控制台报错
+      state.status = result.data?.status ?? 'unavailable'
     } catch (error) {
       state.status = 'unavailable'
       state.error = error instanceof Error ? error.message : 'health check failed'
@@ -23,10 +24,11 @@ export function useHealthStore() {
     }
   }
 
-  return {
+  // 包 reactive 让模板和脚本里直接拿到解包后的值，而不是 ComputedRef 对象
+  return reactive({
     status: computed(() => state.status),
     loading: computed(() => state.loading),
     error: computed(() => state.error),
     refresh,
-  }
+  })
 }

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from backend.app.core.errors import InsufficientStockDataError
+from backend.app.core.errors import InsufficientStockDataError, QuantCalculationError
 from backend.app.quant.backtest import run_backtest
 from backend.app.quant.config import ConfigInput
 from backend.app.quant.indicators import INDICATOR_COLUMNS, calculate_indicators
@@ -57,11 +57,17 @@ class QuantService:
         end_date: Optional[date] = None,
     ) -> Dict[str, Any]:
         frame = self._stock.get_daily_kline_frame(stock_code, start_date, end_date)
-        return to_json_safe(self._run(run_backtest, frame, self._config))
+        result = to_json_safe(self._run(run_backtest, frame, self._config))
+        result["stock_code"] = stock_code
+        return result
 
     @staticmethod
     def _run(func, frame: pd.DataFrame, config: ConfigInput):
         try:
             return func(frame, config)
+        except InsufficientStockDataError:
+            raise
         except QuantInsufficientDataError as exc:
             raise InsufficientStockDataError(str(exc)) from exc
+        except (ValueError, ZeroDivisionError, OverflowError, RuntimeError) as exc:
+            raise QuantCalculationError(str(exc)) from exc

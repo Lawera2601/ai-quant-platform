@@ -7,6 +7,12 @@ class ApplicationError(RuntimeError):
         super().__init__(message or self.message)
 
 
+class InvalidParameterError(ApplicationError):
+    code = 40001
+    message = "invalid parameter"
+    status_code = 400
+
+
 class StockNotFoundError(ApplicationError):
     code = 40002
     message = "stock not found"
@@ -17,6 +23,18 @@ class InsufficientStockDataError(ApplicationError):
     code = 40003
     message = "insufficient stock data"
     status_code = 422
+
+
+class DataProviderError(ApplicationError):
+    code = 50001
+    message = "data provider error"
+    status_code = 502
+
+
+class QuantCalculationError(ApplicationError):
+    code = 50003
+    message = "quant calculation error"
+    status_code = 500
 
 
 class DatabaseOperationError(ApplicationError):

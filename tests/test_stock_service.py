@@ -5,7 +5,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.errors import InsufficientStockDataError
-from backend.app.data.providers.base import EmptyStockDataError, StockDataProvider
+from backend.app.data.providers.base import (
+    EmptyStockDataError,
+    InvalidStockCodeError,
+    StockDataProvider,
+    StockDataSchemaError,
+)
 from backend.app.main import app
 from backend.app.schemas.stock import DailyKlineSchema
 from backend.app.services.stock_service import DEFAULT_MIN_KLINE_ROWS, StockService
@@ -163,3 +168,34 @@ def test_endpoint_rejects_non_daily_period():
     )
 
     assert response.status_code == 400
+    assert response.json()["code"] == 40001
+
+
+def test_endpoint_invalid_stock_code_returns_40001():
+    import backend.app.api.v1.stocks as stocks_module
+
+    class FakeService:
+        def get_daily_kline(self, stock_code, start_date=None, end_date=None):
+            raise InvalidStockCodeError("stock_code must be a 6-digit string")
+
+    stocks_module._service = FakeService()
+
+    response = TestClient(app).get("/api/v1/stocks/abc/kline")
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 40001
+
+
+def test_endpoint_provider_error_returns_50001():
+    import backend.app.api.v1.stocks as stocks_module
+
+    class FakeService:
+        def get_daily_kline(self, stock_code, start_date=None, end_date=None):
+            raise StockDataSchemaError("missing required columns")
+
+    stocks_module._service = FakeService()
+
+    response = TestClient(app).get(f"/api/v1/stocks/{STOCK_CODE}/kline")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == 50001

@@ -1,8 +1,9 @@
 from datetime import date
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
+from backend.app.core.errors import DataProviderError, InvalidParameterError
 from backend.app.data.providers.base import InvalidStockCodeError, StockDataProviderError
 from backend.app.schemas.common import ApiResponse
 from backend.app.schemas.stock import DailyKlineSchema
@@ -22,11 +23,11 @@ def get_stock_kline(
     period: str = "daily",
 ) -> ApiResponse[List[DailyKlineSchema]]:
     if period != _SUPPORTED_PERIOD:
-        raise HTTPException(status_code=400, detail="V1 kline only supports the daily period")
+        raise InvalidParameterError("V1 kline only supports the daily period")
     try:
         data = _service.get_daily_kline(stock_code, start_date, end_date)
     except InvalidStockCodeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise InvalidParameterError(str(exc)) from exc
     except StockDataProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise DataProviderError(str(exc)) from exc
     return ApiResponse(data=data)

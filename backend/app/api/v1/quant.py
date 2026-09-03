@@ -1,9 +1,10 @@
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from backend.app.core.errors import DataProviderError, InvalidParameterError
 from backend.app.data.providers.base import InvalidStockCodeError, StockDataProviderError
 from backend.app.schemas.common import ApiResponse
 from backend.app.services.quant_service import QuantService
@@ -27,9 +28,9 @@ def get_stock_indicators(
     try:
         data = _service.get_indicators(stock_code, start_date, end_date)
     except InvalidStockCodeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise InvalidParameterError(str(exc)) from exc
     except StockDataProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise DataProviderError(str(exc)) from exc
     return ApiResponse(data=data)
 
 
@@ -42,9 +43,9 @@ def get_stock_score(
     try:
         data = _service.get_score(stock_code, start_date, end_date)
     except InvalidStockCodeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise InvalidParameterError(str(exc)) from exc
     except StockDataProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise DataProviderError(str(exc)) from exc
     return ApiResponse(data=data)
 
 
@@ -53,7 +54,7 @@ def run_stock_backtest(request: BacktestRequest) -> ApiResponse[Dict[str, Any]]:
     try:
         data = _service.run_backtest(request.stock_code, request.start_date, request.end_date)
     except InvalidStockCodeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise InvalidParameterError(str(exc)) from exc
     except StockDataProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise DataProviderError(str(exc)) from exc
     return ApiResponse(data=data)

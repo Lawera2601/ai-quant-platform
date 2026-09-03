@@ -3,7 +3,8 @@ from datetime import date, timedelta
 import pandas as pd
 from fastapi.testclient import TestClient
 
-from backend.app.data.providers.base import StockDataProvider
+from backend.app.core.errors import QuantCalculationError
+from backend.app.data.providers.base import StockDataProvider, StockDataSchemaError
 from backend.app.main import app
 from backend.app.services.quant_service import QuantService
 from backend.app.services.stock_service import StockService
@@ -73,6 +74,7 @@ def test_backtest_returns_equity_curve_and_summary():
 
     assert response.status_code == 200
     data = response.json()["data"]
+    assert data["stock_code"] == STOCK_CODE
     assert "equity_curve" in data
     assert "initial_cash" in data
     assert "final_equity" in data
@@ -87,3 +89,33 @@ def test_backtest_rejects_invalid_stock_code():
 
     assert response.status_code == 400
     assert response.json()["code"] == 40001
+
+
+def test_score_calc_error_returns_50003():
+    import backend.app.api.v1.quant as quant_module
+
+    class FakeService:
+        def get_score(self, stock_code, start_date=None, end_date=None):
+            raise QuantCalculationError("quant calculation failed")
+
+    quant_module._service = FakeService()
+
+    response = TestClient(app).get(f"/api/v1/stocks/{STOCK_CODE}/score")
+
+    assert response.status_code == 500
+    assert response.json()["code"] == 50003
+
+
+def test_indicators_provider_error_returns_50001():
+    import backend.app.api.v1.quant as quant_module
+
+    class FakeService:
+        def get_indicators(self, stock_code, start_date=None, end_date=None):
+            raise StockDataSchemaError("missing required columns")
+
+    quant_module._service = FakeService()
+
+    response = TestClient(app).get(f"/api/v1/stocks/{STOCK_CODE}/indicators")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == 50001

@@ -8,21 +8,27 @@ Upsert MySQL -> 返回).
 Repository methods are portable across the SQLite test database and MySQL 8
 (no MySQL-specific DDL is used), so the upsert/query logic is unit-testable
 without a running MySQL instance.
+
+All ``SQLAlchemyError`` failures are translated into ``DatabaseOperationError``
+(business code 50002) and the session is rolled back, so callers observe a
+stable business error instead of a raw driver exception.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional, Sequence
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from backend.app.core.errors import StockNotFoundError
+from backend.app.core.errors import DatabaseOperationError, StockNotFoundError
 from backend.app.data.providers.akshare_provider import AKShareStockProvider
 from backend.app.data.providers.base import StockDataProvider
 from backend.app.models.stock_basic import StockBasic
 from backend.app.models.stock_daily import StockDaily
 from backend.app.schemas.stock import DailyKlineSchema, StockBasicSchema
+from backend.app.services.stock_service import DEFAULT_MIN_KLINE_ROWS
 
 
 class MarketDataRepository:
@@ -32,56 +38,68 @@ class MarketDataRepository:
         self._session = session
 
     def upsert_stock_basic(self, item: StockBasicSchema) -> None:
-        record = self._session.get(StockBasic, item.stock_code)
-        if record is None:
-            self._session.add(
-                StockBasic(
-                    stock_code=item.stock_code,
-                    stock_name=item.stock_name,
-                    industry=item.industry,
-                    total_market_cap=item.total_market_cap,
-                    float_market_cap=item.float_market_cap,
+        try:
+            record = self._session.get(StockBasic, item.stock_code)
+            if record is None:
+                self._session.add(
+                    StockBasic(
+                        stock_code=item.stock_code,
+                        stock_name=item.stock_name,
+                        industry=item.industry,
+                        total_market_cap=item.total_market_cap,
+                        float_market_cap=item.float_market_cap,
+                    )
                 )
-            )
-        else:
-            record.stock_name = item.stock_name
-            record.industry = item.industry
-            record.total_market_cap = item.total_market_cap
-            record.float_market_cap = item.float_market_cap
-        self._session.commit()
+            else:
+                record.stock_name = item.stock_name
+                record.industry = item.industry
+                record.total_market_cap = item.total_market_cap
+                record.float_market_cap = item.float_market_cap
+            self._session.commit()
+        except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise DatabaseOperationError() from exc
 
     def get_stock_basic(self, stock_code: str) -> Optional[StockBasicSchema]:
-        record = self._session.get(StockBasic, stock_code)
-        if record is None:
-            return None
-        return StockBasicSchema(
-            stock_code=record.stock_code,
-            stock_name=record.stock_name,
-            industry=record.industry,
-            total_market_cap=record.total_market_cap,
-            float_market_cap=record.float_market_cap,
-        )
+        try:
+            record = self._session.get(StockBasic, stock_code)
+            if record is None:
+                return None
+            return StockBasicSchema(
+                stock_code=record.stock_code,
+                stock_name=record.stock_name,
+                industry=record.industry,
+                total_market_cap=record.total_market_cap,
+                float_market_cap=record.float_market_cap,
+            )
+        except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise DatabaseOperationError() from exc
 
     def upsert_daily(self, rows: Sequence[DailyKlineSchema]) -> int:
         """Insert or update daily bars keyed by ``(stock_code, trade_date)``."""
-        count = 0
-        for row in rows:
-            record = (
-                self._session.query(StockDaily)
-                .filter_by(stock_code=row.stock_code, trade_date=row.trade_date)
-                .one_or_none()
-            )
-            if record is None:
-                self._session.add(StockDaily(**row.model_dump()))
-            else:
-                payload = row.model_dump()
-                payload.pop("stock_code", None)
-                payload.pop("trade_date", None)
-                for field, value in payload.items():
-                    setattr(record, field, value)
-            count += 1
-        self._session.commit()
-        return count
+        try:
+            count = 0
+            for row in rows:
+                record = (
+                    self._session.query(StockDaily)
+                    .filter_by(stock_code=row.stock_code, trade_date=row.trade_date)
+                    .one_or_none()
+                )
+                if record is None:
+                    self._session.add(StockDaily(**row.model_dump()))
+                else:
+                    payload = row.model_dump()
+                    payload.pop("stock_code", None)
+                    payload.pop("trade_date", None)
+                    for field, value in payload.items():
+                        setattr(record, field, value)
+                count += 1
+            self._session.commit()
+            return count
+        except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise DatabaseOperationError() from exc
 
     def list_daily(
         self,
@@ -89,15 +107,19 @@ class MarketDataRepository:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
     ) -> List[DailyKlineSchema]:
-        query = self._session.query(StockDaily).filter(
-            StockDaily.stock_code == stock_code
-        )
-        if start_date is not None:
-            query = query.filter(StockDaily.trade_date >= start_date)
-        if end_date is not None:
-            query = query.filter(StockDaily.trade_date <= end_date)
-        records = query.order_by(StockDaily.trade_date.asc()).all()
-        return [self._to_schema(record) for record in records]
+        try:
+            query = self._session.query(StockDaily).filter(
+                StockDaily.stock_code == stock_code
+            )
+            if start_date is not None:
+                query = query.filter(StockDaily.trade_date >= start_date)
+            if end_date is not None:
+                query = query.filter(StockDaily.trade_date <= end_date)
+            records = query.order_by(StockDaily.trade_date.asc()).all()
+            return [self._to_schema(record) for record in records]
+        except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise DatabaseOperationError() from exc
 
     @staticmethod
     def _to_schema(record: StockDaily) -> DailyKlineSchema:
@@ -145,20 +167,23 @@ class MarketDataService:
         stock_code: str,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        min_rows: int = DEFAULT_MIN_KLINE_ROWS,
     ) -> List[DailyKlineSchema]:
-        """Query MySQL first; sync from the provider when the cache is empty.
+        """Query MySQL first, but only treat the cache as a full hit when it is
+        complete for the requested window (``min_rows`` bars).
 
-        Raises ``StockNotFoundError`` (40002) when the provider also has no data.
+        A partial cache (fewer than ``min_rows`` rows) is NOT considered a hit so
+        the missing range is fetched from the provider and upserted — this keeps
+        downstream quant calls on the >= 60 valid-day daily-K contract. Raises
+        ``StockNotFoundError`` (40002) when the provider also has no data.
         """
+        end_date = end_date or date.today()
+        start_date = start_date or (end_date - timedelta(days=366))
         if self._repository is not None:
             cached = self._repository.list_daily(stock_code, start_date, end_date)
-            if cached:
+            if len(cached) >= min_rows:
                 return cached
-        fetched = self.sync_daily(
-            stock_code,
-            start_date or date(1970, 1, 1),
-            end_date or date.today(),
-        )
+        fetched = self.sync_daily(stock_code, start_date, end_date)
         if not fetched:
             raise StockNotFoundError(f"no daily data found for {stock_code}")
         return fetched

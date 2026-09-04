@@ -1,8 +1,11 @@
 from datetime import datetime
 
+import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from backend.app.core.errors import DatabaseOperationError
 from backend.app.db.migrations import apply_migrations
 from backend.app.schemas.ai import NewsItemContext
 from backend.app.services.news_service import NewsRepository, NewsService
@@ -84,3 +87,89 @@ def test_news_service_works_without_repository():
 
     assert len(items) == 2
     assert isinstance(items[0], NewsItemContext)
+
+
+def test_get_news_orders_by_publish_time_descending_with_nulls_last():
+    # Provider returns out-of-order news (as AKShare actually does).
+    provider = FakeNewsProvider(
+        [
+            {"stock_code": STOCK_CODE, "title": "old", "source": "s1", "publish_time": datetime(2026, 8, 30), "url": "u1"},
+            {"stock_code": STOCK_CODE, "title": "no-time", "source": "s2", "publish_time": None, "url": "u2"},
+            {"stock_code": STOCK_CODE, "title": "new", "source": "s3", "publish_time": datetime(2026, 9, 2), "url": "u3"},
+        ]
+    )
+    service = NewsService(provider=provider)
+
+    items = service.get_news(STOCK_CODE, limit=10)
+
+    assert [item.title for item in items] == ["new", "old", "no-time"]
+
+
+def test_get_news_truncates_latest_first():
+    provider = FakeNewsProvider(
+        [
+            {"stock_code": STOCK_CODE, "title": "old", "source": "s1", "publish_time": datetime(2026, 8, 30)},
+            {"stock_code": STOCK_CODE, "title": "newest", "source": "s2", "publish_time": datetime(2026, 9, 2)},
+        ]
+    )
+    service = NewsService(provider=provider)
+
+    items = service.get_news(STOCK_CODE, limit=1)
+
+    assert [item.title for item in items] == ["newest"]
+
+
+class FailingWriteSession:
+    def __init__(self):
+        self.rolled_back = False
+
+    def add(self, record):  # noqa: ANN001
+        pass
+
+    def query(self, *args, **kwargs):
+        class _Query:
+            def filter(self, *a, **k):
+                return self
+
+            def first(self):
+                return None
+
+            def one_or_none(self):
+                return None
+
+            def order_by(self, *a, **k):
+                return self
+
+            def limit(self, *a, **k):
+                return self
+
+            def all(self):
+                return []
+
+        return _Query()
+
+    def commit(self):
+        raise SQLAlchemyError("commit failed")
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+def test_news_repository_converts_db_failure_to_database_operation_error():
+    session = FailingWriteSession()
+    repository = NewsRepository(session)
+
+    with pytest.raises(DatabaseOperationError):
+        repository.upsert(
+            [
+                {
+                    "stock_code": STOCK_CODE,
+                    "title": "公告",
+                    "source": "交易所",
+                    "publish_time": datetime(2026, 8, 31, 9, 30),
+                    "url": "http://x/1.html",
+                }
+            ]
+        )
+
+    assert session.rolled_back is True

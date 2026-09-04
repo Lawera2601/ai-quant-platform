@@ -1,7 +1,9 @@
 from datetime import datetime
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -68,3 +70,28 @@ def test_news_endpoint_rejects_out_of_range_limit():
 
     assert response.status_code == 400
     assert response.json()["code"] == 40001
+
+
+def test_news_endpoint_returns_50002_on_database_error():
+    class FailingSession:
+        def __init__(self):
+            self.rolled_back = False
+
+        def query(self, *args, **kwargs):
+            raise SQLAlchemyError("db down")
+
+        def rollback(self):
+            self.rolled_back = True
+
+    app.dependency_overrides[get_db] = lambda: FailingSession()
+    try:
+        response = TestClient(app).get(f"/api/v1/stocks/{STOCK_CODE}/news")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": 50002,
+        "message": "database error",
+        "data": None,
+    }

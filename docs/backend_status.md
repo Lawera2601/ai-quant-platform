@@ -47,7 +47,7 @@
 - GitHub 推送需 **PAT 令牌**（`repo` 权限），用完即撤销；用 `git -c credential.helper= push ...` 或把令牌放 URL（注意令牌只在生成时显示一次，别提交、别写进 config）。
 - 本环境访问 GitHub 需走代理（`socks5://127.0.0.1:7892` 为 Clash 端口）；直连会 `Recv failure`。
 - 后端环境：`.venv`（Python），`backend/requirements.txt`；前端 `frontend/node_modules`。
-- 本机 MySQL 未启动（`127.0.0.1:3306` 关闭），迁移/Upsert 已用 SQLite 在测试中验证；接真实 MySQL 时运行 `python scripts/migrate_db.py`。
+- 本机 MySQL 已启用并完成真库验证：`python scripts/migrate_db.py` 建 6 表 + `schema_version`（`0 -> 1`）；`python scripts/sync_market_data.py --stock-code 600519` 同步/回读 **244 行**；新闻服务真库取到并落库 5 条。数据库连接只有本地 `.env`（gitignored，含密码，勿提交）。
 
 ## 6. 补充说明
 

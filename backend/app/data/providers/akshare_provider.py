@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, Iterable, List
 
 import math
@@ -198,9 +198,19 @@ class AKShareStockProvider(StockDataProvider):
                     "url": self._cell_text(row.get("url")),
                 }
             )
-            if len(items) >= limit:
-                break
-        return items
+        # Sort ALL valid news newest-first (NULL last) BEFORE applying ``limit``,
+        # so the newest item is never dropped by the source's non-time-sorted
+        # order (e.g. the newest item appearing at the tail of the raw frame).
+        return self._sort_news(items)[:limit]
+
+    @staticmethod
+    def _sort_news(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return items sorted by ``publish_time`` descending, ``None`` last."""
+        return sorted(
+            items,
+            key=lambda item: item.get("publish_time") or datetime.min,
+            reverse=True,
+        )
 
     @staticmethod
     def _pick_column(frame: pd.DataFrame, candidates: tuple) -> Any:

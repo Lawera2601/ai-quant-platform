@@ -6,10 +6,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from backend.app.core.errors import DatabaseOperationError
+from backend.app.core.errors import DatabaseOperationError, InsufficientStockDataError
 from backend.app.db.migrations import apply_migrations
 from backend.app.schemas.stock import DailyKlineSchema, StockBasicSchema
 from backend.app.services.market_data_service import MarketDataRepository, MarketDataService
+from backend.app.services.stock_service import StockService
 
 STOCK_CODE = "600519"
 
@@ -120,7 +121,9 @@ def test_query_daily_does_not_treat_partial_cache_as_full_hit():
         repository.upsert_daily([_bar(STOCK_CODE, start)])  # only 1 cached row
 
         provider = RecordingProvider(60)
-        service = MarketDataService(provider=provider, repository=repository)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
 
         rows = service.query_daily(STOCK_CODE, start, start + timedelta(days=400), min_rows=60)
 
@@ -138,11 +141,55 @@ def test_query_daily_serves_complete_cache_without_refetch():
             def get_daily_kline(self, *args, **kwargs):
                 raise AssertionError("provider must not be called when cache is complete")
 
-        service = MarketDataService(provider=FailingProvider(), repository=repository)
+        service = MarketDataService(
+            stock_service=StockService(provider=FailingProvider()), repository=repository
+        )
 
         rows = service.query_daily(STOCK_CODE, start, start + timedelta(days=400), min_rows=60)
 
         assert len(rows) == 60
+
+
+def test_query_daily_raises_40003_when_provider_still_returns_too_few():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        repository.upsert_daily([_bar(STOCK_CODE, start)])  # partial cache
+
+        class ShortProvider:
+            def get_daily_kline(self, stock_code, start_date, end_date, adjust="qfq"):
+                return _provider_frame(2, start_date)
+
+        service = MarketDataService(
+            stock_service=StockService(provider=ShortProvider()), repository=repository
+        )
+
+        with pytest.raises(InsufficientStockDataError):  # business code 40003
+            service.query_daily(STOCK_CODE, start, start + timedelta(days=400), min_rows=60)
+
+
+def test_query_daily_drops_invalid_ohlc_rows():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+
+        class PartiallyInvalidProvider:
+            def get_daily_kline(self, stock_code, start_date, end_date, adjust="qfq"):
+                frame = _provider_frame(70, start_date)
+                for i in range(65, 70):
+                    frame.loc[i, "high"] = 80.0  # invalid: high < open/close
+                return frame
+
+        service = MarketDataService(
+            stock_service=StockService(provider=PartiallyInvalidProvider()),
+            repository=repository,
+        )
+
+        rows = service.query_daily(STOCK_CODE, start, start + timedelta(days=400), min_rows=60)
+
+        assert len(rows) >= 60
+        assert all(r.high >= r.open and r.high >= r.close for r in rows)
+        assert all(r.low <= r.open and r.low <= r.close for r in rows)
 
 
 class FailingSession:

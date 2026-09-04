@@ -22,13 +22,11 @@ from typing import List, Optional, Sequence
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from backend.app.core.errors import DatabaseOperationError, StockNotFoundError
-from backend.app.data.providers.akshare_provider import AKShareStockProvider
-from backend.app.data.providers.base import StockDataProvider
+from backend.app.core.errors import DatabaseOperationError
 from backend.app.models.stock_basic import StockBasic
 from backend.app.models.stock_daily import StockDaily
 from backend.app.schemas.stock import DailyKlineSchema, StockBasicSchema
-from backend.app.services.stock_service import DEFAULT_MIN_KLINE_ROWS
+from backend.app.services.stock_service import DEFAULT_MIN_KLINE_ROWS, StockService
 
 
 class MarketDataRepository:
@@ -138,14 +136,19 @@ class MarketDataRepository:
 
 
 class MarketDataService:
-    """Orchestrates fetch-from-provider -> upsert -> query for daily bars."""
+    """Orchestrates fetch-from-provider -> upsert -> query for daily bars.
+
+    Reuses :class:`StockService` for cleaning and automatic window-widening, so
+    the returned window always satisfies the >= ``min_rows`` valid-day contract;
+    ``InsufficientStockDataError`` (40003) is raised when it cannot be met.
+    """
 
     def __init__(
         self,
-        provider: Optional[StockDataProvider] = None,
+        stock_service: Optional[StockService] = None,
         repository: Optional[MarketDataRepository] = None,
     ) -> None:
-        self._provider = provider or AKShareStockProvider()
+        self._stock = stock_service or StockService()
         self._repository = repository
 
     def sync_daily(
@@ -153,11 +156,12 @@ class MarketDataService:
         stock_code: str,
         start_date: date,
         end_date: date,
+        min_rows: int = DEFAULT_MIN_KLINE_ROWS,
     ) -> List[DailyKlineSchema]:
-        frame = self._provider.get_daily_kline(
-            stock_code, start_date, end_date, adjust="qfq"
+        """Fetch + clean + widen via StockService, then upsert into MySQL."""
+        rows = self._stock.get_daily_kline(
+            stock_code, start_date, end_date, min_rows=min_rows
         )
-        rows = [DailyKlineSchema(**record) for record in frame.to_dict("records")]
         if self._repository is not None:
             self._repository.upsert_daily(rows)
         return rows
@@ -169,13 +173,14 @@ class MarketDataService:
         end_date: Optional[date] = None,
         min_rows: int = DEFAULT_MIN_KLINE_ROWS,
     ) -> List[DailyKlineSchema]:
-        """Query MySQL first, but only treat the cache as a full hit when it is
-        complete for the requested window (``min_rows`` bars).
+        """Query MySQL first, treating the cache as a full hit only when it has
+        at least ``min_rows`` bars in the requested window.
 
-        A partial cache (fewer than ``min_rows`` rows) is NOT considered a hit so
-        the missing range is fetched from the provider and upserted — this keeps
-        downstream quant calls on the >= 60 valid-day daily-K contract. Raises
-        ``StockNotFoundError`` (40002) when the provider also has no data.
+        Otherwise it fetches via :class:`StockService` (which cleans and widens
+        the window to guarantee ``min_rows`` valid rows) and upserts the result.
+        Raises ``InsufficientStockDataError`` (40003) when even the widest fetch
+        cannot produce ``min_rows`` valid rows; ``StockNotFoundError`` (40002)
+        is never raised here because the provider is always consulted.
         """
         end_date = end_date or date.today()
         start_date = start_date or (end_date - timedelta(days=366))
@@ -183,7 +188,4 @@ class MarketDataService:
             cached = self._repository.list_daily(stock_code, start_date, end_date)
             if len(cached) >= min_rows:
                 return cached
-        fetched = self.sync_daily(stock_code, start_date, end_date)
-        if not fetched:
-            raise StockNotFoundError(f"no daily data found for {stock_code}")
-        return fetched
+        return self.sync_daily(stock_code, start_date, end_date, min_rows=min_rows)

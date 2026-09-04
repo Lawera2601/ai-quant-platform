@@ -1,7 +1,7 @@
 """Tests for AKShare news normalization in the provider."""
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -77,3 +77,26 @@ def test_rejects_invalid_stock_code(monkeypatch):
 
     with pytest.raises(InvalidStockCodeError):
         AKShareStockProvider().get_stock_news("abc")
+
+
+def test_sorts_all_news_before_applying_limit_newest_at_tail(monkeypatch):
+    # 51 items, newest (index 50 / title "n50") at the very end of the raw order.
+    n = 51
+    base = datetime(2026, 8, 1, 0, 0)
+    frame = pd.DataFrame(
+        {
+            "关键词": ["600519"] * n,
+            "新闻标题": [f"n{i}" for i in range(n)],
+            "新闻内容": ["内容"] * n,
+            "发布时间": [(base + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S") for i in range(n)],
+            "文章来源": ["来源"] * n,
+            "新闻链接": [f"http://finance.eastmoney.com/a/{i}.html" for i in range(n)],
+        }
+    )
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(frame))
+
+    items = AKShareStockProvider().get_stock_news("600519", limit=1)
+
+    assert len(items) == 1
+    assert items[0]["title"] == "n50"  # newest (at raw tail) survives the sort
+

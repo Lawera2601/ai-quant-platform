@@ -127,7 +127,10 @@ def test_query_daily_does_not_treat_partial_cache_as_full_hit():
             stock_service=StockService(provider=provider), repository=repository
         )
 
-        rows = service.query_daily(STOCK_CODE, start, start + timedelta(days=400), min_rows=60)
+        rows = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=400), min_rows=60,
+            trading_days=lambda s, e: 60,
+        )
 
         assert len(provider.calls) == 1  # partial cache -> provider called
         assert len(rows) >= 60
@@ -148,7 +151,10 @@ def test_query_daily_serves_complete_cache_without_refetch():
         )
 
         # Query the exact range the cache covers so it counts as complete+fresh.
-        rows = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
+        rows = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59),
+            min_rows=60, trading_days=lambda s, e: 60,
+        )
 
         assert len(rows) == 60
 
@@ -166,7 +172,8 @@ def test_query_daily_refetches_when_cache_is_stale():
         )
 
         rows = service.query_daily(
-            STOCK_CODE, start, start + timedelta(days=79), min_rows=60, max_stale_days=3
+            STOCK_CODE, start, start + timedelta(days=79),
+            min_rows=60, max_stale_days=3, trading_days=lambda s, e: 60,
         )
 
         assert len(provider.calls) == 1  # stale (last bar 20d before end) -> refetch
@@ -186,7 +193,8 @@ def test_query_daily_refetches_when_cache_does_not_cover_start_of_range():
         )
 
         rows = service.query_daily(
-            STOCK_CODE, start, start + timedelta(days=69), min_rows=60, max_stale_days=3
+            STOCK_CODE, start, start + timedelta(days=69),
+            min_rows=60, max_stale_days=3, trading_days=lambda s, e: 60,
         )
 
         assert len(provider.calls) == 1  # first bar is 10d after start -> refetch
@@ -223,7 +231,8 @@ def test_query_daily_refetches_when_cache_contains_invalid_ohlc():
         )
 
         rows_out = service.query_daily(
-            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, max_stale_days=3
+            STOCK_CODE, start, start + timedelta(days=59),
+            min_rows=60, max_stale_days=3, trading_days=lambda s, e: 60,
         )
 
         assert len(provider.calls) == 1  # 60 rows but invalid bar -> refetch
@@ -234,6 +243,25 @@ def test_query_daily_refetches_when_cache_contains_invalid_ohlc():
             and r.low <= r.close
             for r in rows_out
         )
+
+
+def test_sync_daily_returns_40003_when_only_59_valid_rows():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+
+        class OneBadLowProvider:
+            def get_daily_kline(self, stock_code, start_date, end_date, adjust="qfq"):
+                frame = _provider_frame(60, start_date)
+                frame.loc[0, "low"] = 0.0  # invalid: non-positive price
+                return frame
+
+        service = MarketDataService(
+            stock_service=StockService(provider=OneBadLowProvider()), repository=repository
+        )
+
+        with pytest.raises(InsufficientStockDataError):  # only 59 valid rows -> 40003
+            service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
 
 
 def test_daily_persistence_roundtrip_uses_decimal_precision():
@@ -297,8 +325,12 @@ def test_first_query_and_cache_hit_return_identical_rounded_rows():
             stock_service=StockService(provider=HighPrecisionProvider()), repository=repository
         )
 
-        first = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
-        second = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
+        first = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, trading_days=lambda s, e: 60
+        )
+        second = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, trading_days=lambda s, e: 60
+        )
 
         # First fetch (sync_daily) and cache hit feed the identical rounded data
         # to the quant module, so scores/trades cannot differ between the two.
@@ -342,8 +374,12 @@ def test_first_query_and_cache_hit_give_identical_quant_score():
             stock_service=StockService(provider=VaryingProvider()), repository=repository
         )
 
-        first = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
-        second = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
+        first = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, trading_days=lambda s, e: 60
+        )
+        second = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, trading_days=lambda s, e: 60
+        )
 
         score_first = calculate_quant_score(_to_quant_frame(first))
         score_second = calculate_quant_score(_to_quant_frame(second))
@@ -380,7 +416,8 @@ def test_query_daily_refetches_when_cache_has_nonpositive_price():
         )
 
         rows_out = service.query_daily(
-            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, max_stale_days=3
+            STOCK_CODE, start, start + timedelta(days=59),
+            min_rows=60, max_stale_days=3, trading_days=lambda s, e: 60,
         )
 
         assert len(provider.calls) == 1  # price<=0 in cache -> refetch
@@ -414,7 +451,8 @@ def test_query_daily_refetches_when_cache_has_null_volume():
         )
 
         rows_out = service.query_daily(
-            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, max_stale_days=3
+            STOCK_CODE, start, start + timedelta(days=59),
+            min_rows=60, max_stale_days=3, trading_days=lambda s, e: 60,
         )
 
         assert len(provider.calls) == 1  # null volume in cache -> refetch
@@ -438,10 +476,32 @@ def test_query_daily_refetches_when_cache_has_internal_gap():
         )
 
         rows_out = service.query_daily(
-            STOCK_CODE, start, start + timedelta(days=79), min_rows=60, max_stale_days=3
+            STOCK_CODE, start, start + timedelta(days=79),
+            min_rows=60, max_stale_days=3, trading_days=lambda s, e: 60,
         )
 
         assert len(provider.calls) == 1  # internal gap -> refetch
+        assert len(rows_out) >= 60
+
+
+def test_query_daily_refetches_when_cache_has_fewer_bars_than_expected_trading_days():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        # The cache only holds 100 bars for a range the calendar says has 120.
+        repository.upsert_daily([_bar(STOCK_CODE, start + timedelta(days=i)) for i in range(100)])
+
+        provider = RecordingProvider(120)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
+
+        rows_out = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=119),
+            min_rows=60, trading_days=lambda s, e: 120,
+        )
+
+        assert len(provider.calls) == 1  # fewer than expected -> refetch
         assert len(rows_out) >= 60
 
 

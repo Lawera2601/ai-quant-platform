@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, timedelta
-from typing import List, Optional, Protocol, Sequence
+from typing import Callable, List, Optional, Protocol, Sequence
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -102,10 +102,17 @@ class MarketDataSource(Protocol):
         min_rows: int = DEFAULT_MIN_KLINE_ROWS,
         max_stale_days: int = DEFAULT_MAX_STALE_DAYS,
         max_gap_days: int = DEFAULT_MAX_GAP_DAYS,
+        trading_days: Optional[Callable[[date, date], int]] = None,
     ) -> List[DailyKlineSchema]:
         """Return a >= ``min_rows`` valid qfq daily window, filling the cache
         from the provider when the cached range is incomplete or stale. All
         returned values are rounded to the canonical precision口径.
+
+        ``trading_days`` is the authoritative completeness basis: a callable that
+        returns the number of trading days in ``[start, end]``. The cache is only
+        served when it contains at least that many bars (an exchange trading
+        calendar would supply this). When ``trading_days`` is not provided the
+        service cannot prove completeness and conservatively refetches.
         """
         ...
 
@@ -296,11 +303,18 @@ class MarketDataService:
         min_rows: int = DEFAULT_MIN_KLINE_ROWS,
         max_stale_days: int = DEFAULT_MAX_STALE_DAYS,
         max_gap_days: int = DEFAULT_MAX_GAP_DAYS,
+        trading_days: Optional[Callable[[date, date], int]] = None,
     ) -> List[DailyKlineSchema]:
         """Query MySQL first, treating the cache as a full hit only when it is
         (a) at least ``min_rows`` bars, (b) all bars are valid for C, (c) there
-        is no internal gap larger than ``max_gap_days``, (d) it covers the start
-        of the requested range, and (e) it is fresh relative to ``end_date``.
+        is no internal gap larger than ``max_gap_days`` (auxiliary), and (d) it
+        is confirmed complete against the authoritative ``trading_days`` basis
+        and fresh relative to ``end_date``.
+
+        ``trading_days`` is a ``(start, end) -> expected bars`` callable (an
+        exchange trading calendar). When it is not provided the service cannot
+        prove completeness, so it conservatively refetches (per C: completeness
+        must not be assumed from row count / endpoints / a gap threshold alone).
 
         Otherwise it fetches via :class:`StockService` (which cleans and widens
         the window to guarantee ``min_rows`` valid rows) and upserts the result.
@@ -312,7 +326,7 @@ class MarketDataService:
         if self._repository is not None:
             cached = self._repository.list_daily(stock_code, start_date, end_date)
             if self._is_cache_complete(
-                cached, start_date, end_date, min_rows, max_stale_days, max_gap_days
+                cached, start_date, end_date, min_rows, max_stale_days, max_gap_days, trading_days
             ):
                 return cached
         return self.sync_daily(stock_code, start_date, end_date, min_rows=min_rows)
@@ -320,7 +334,7 @@ class MarketDataService:
     @staticmethod
     def _gaps_valid(cached: Sequence[DailyKlineSchema], max_gap_days: int) -> bool:
         """False when any two consecutive bars are farther apart than ``max_gap_days``
-        (an internal chunk of the window is missing)."""
+        (an internal chunk of the window is missing). Auxiliary check only."""
         for previous, current in zip(cached, cached[1:]):
             if (current.trade_date - previous.trade_date).days > max_gap_days:
                 return False
@@ -334,14 +348,21 @@ class MarketDataService:
         min_rows: int,
         max_stale_days: int,
         max_gap_days: int,
+        trading_days: Optional[Callable[[date, date], int]],
     ) -> bool:
-        """Full cache-hit decision combining count, validity, gaps and coverage."""
+        """Full cache-hit decision. Completeness is only confirmed against the
+        authoritative ``trading_days`` count; without it the cache is not served.
+        """
+        if trading_days is None:
+            return False  # cannot prove completeness -> conservative refetch
         if len(cached) < min_rows:
             return False
         if not MarketDataRepository._cached_rows_valid(cached):
             return False  # invalid bars must not count as a full hit
         if not MarketDataService._gaps_valid(cached, max_gap_days):
-            return False  # a middle chunk is missing
+            return False  # an obvious internal chunk is missing
+        if len(cached) < trading_days(start, end):
+            return False  # fewer bars than the authoritative trading-day count
         first = cached[0].trade_date
         last = cached[-1].trade_date
         if (first - start).days > max_stale_days:

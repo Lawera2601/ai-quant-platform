@@ -1,3 +1,4 @@
+import math
 from datetime import date, timedelta
 
 import pandas as pd
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.errors import DatabaseOperationError, InsufficientStockDataError
 from backend.app.db.migrations import apply_migrations
+from backend.app.quant.scoring import calculate_quant_score
 from backend.app.schemas.stock import DailyKlineSchema, StockBasicSchema
 from backend.app.services.market_data_service import MarketDataRepository, MarketDataService
 from backend.app.services.stock_service import StockService
@@ -302,6 +304,53 @@ def test_first_query_and_cache_hit_return_identical_rounded_rows():
         # to the quant module, so scores/trades cannot differ between the two.
         assert first == second
         assert first[0].close == round(105.9876543, 4)
+
+
+def _varying_frame(n, start_date):
+    dates = [start_date + timedelta(days=i) for i in range(n)]
+    closes = [100 + i * 0.2 + 5 * math.sin(i / 2.0) for i in range(n)]
+    return pd.DataFrame(
+        {
+            "stock_code": [STOCK_CODE] * n,
+            "trade_date": dates,
+            "open": [c - 1.0 for c in closes],
+            "high": [c + 2.0 for c in closes],
+            "low": [c - 2.0 for c in closes],
+            "close": closes,
+            "volume": [1000 + i * 10 for i in range(n)],
+            "amount": [c * 1000 for c in closes],
+            "turnover_rate": [0.01] * n,
+            "change_pct": [0.01] * n,
+        }
+    )
+
+
+def _to_quant_frame(rows):
+    return pd.DataFrame([row.model_dump() for row in rows])
+
+
+def test_first_query_and_cache_hit_give_identical_quant_score():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+
+        class VaryingProvider:
+            def get_daily_kline(self, stock_code, start_date, end_date, adjust="qfq"):
+                return _varying_frame(60, start_date)
+
+        service = MarketDataService(
+            stock_service=StockService(provider=VaryingProvider()), repository=repository
+        )
+
+        first = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
+        second = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
+
+        score_first = calculate_quant_score(_to_quant_frame(first))
+        score_second = calculate_quant_score(_to_quant_frame(second))
+
+        # Identical data -> identical full quant output (not just DB decimals).
+        assert score_first == score_second
+        assert score_first["score"] == score_second["score"]
 
 
 def test_query_daily_refetches_when_cache_has_nonpositive_price():

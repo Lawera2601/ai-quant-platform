@@ -23,7 +23,7 @@ from typing import List, Optional, Protocol, Sequence
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from backend.app.core.errors import DatabaseOperationError
+from backend.app.core.errors import DatabaseOperationError, InsufficientStockDataError
 from backend.app.models.stock_basic import StockBasic
 from backend.app.models.stock_daily import StockDaily
 from backend.app.schemas.stock import DailyKlineSchema, StockBasicSchema
@@ -270,12 +270,20 @@ class MarketDataService:
 
         Returns the *same rounded* rows that are written to the DB, so a caller
         sees the identical numbers whether it reads fresh from the provider or
-        from a later cache hit.
+        from a later cache hit. Rows that C's quant would reject (non-positive
+        price, null volume, illegal OHLC) are dropped using the same rule as the
+        cache validity check; if fewer than ``min_rows`` remain, 40003 is raised.
         """
         fetched = self._stock.get_daily_kline(
             stock_code, start_date, end_date, min_rows=min_rows
         )
         rows = [_round_daily(row) for row in fetched]
+        rows = [row for row in rows if _is_valid_bar(row)]
+        if len(rows) < min_rows:
+            raise InsufficientStockDataError(
+                f"stock {stock_code} has {len(rows)} valid rows after the "
+                f"consistency filter; at least {min_rows} required"
+            )
         if self._repository is not None:
             self._repository.upsert_daily(rows)
         return rows

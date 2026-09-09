@@ -34,7 +34,7 @@
 - **DB 异常**：两个 Repository 的 `SQLAlchemyError` 统一转为 `DatabaseOperationError`（`50002`）并 rollback，`/news` 在 DB 故障时返回 `ApiResponse{code:50002, message:"database error"}`
 - 错误：统一业务码 + `ApiResponse`（`40001`/`40002`/`40003`/`50001`/`50002`/`50003`），见 `docs/API_SPEC.md`。
 - 契约：`docs/API_SPEC.md`（新增 4.3 股票新闻）。
-- 测试：`pytest tests -q` → **133 passed**（基线 95 + 新增 38）。
+- 测试：`pytest tests -q` → **134 passed**（基线 95 + 新增 39）。
 
 ### 可注入接口（给 D）
 

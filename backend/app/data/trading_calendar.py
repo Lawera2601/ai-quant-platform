@@ -5,7 +5,13 @@ a ``(start, end) -> expected trading-day count`` callable derived from the actua
 A-share trade-date calendar (via AKShare), so the cache-completeness judgment is
 not a fixed test value.
 
-The calendar list is loaded once per provider instance and cached in-process.
+Coverage safety: an empty/expired/partial calendar must NOT be treated as a
+trustworthy count of 0. ``count_between`` returns ``None`` whenever the calendar
+cannot *prove* it covers the full window (no data, or the earliest/latest known
+trade date does not bracket ``[start, end]``). Callers treat ``None`` as
+"coverage unknown" and must conservatively refetch rather than serving a cache.
+
+The calendar list is cached in-process and can be reloaded with :meth:`refresh`.
 For offline tests, a deterministic ``trade_dates`` list (or a ``fetch`` callable)
 can be injected instead of hitting AKShare.
 """
@@ -29,19 +35,30 @@ class TradingCalendarProvider:
         self._trade_dates = trade_dates
         self._fetch = fetch
 
-    def get_trade_dates(self) -> List[date]:
-        if self._trade_dates is None:
+    def get_trade_dates(self, refresh: bool = False) -> List[date]:
+        if refresh or self._trade_dates is None:
             self._trade_dates = (
                 self._fetch() if self._fetch is not None else self._load_from_akshare()
             )
         return self._trade_dates
 
-    def count_between(self, start: date, end: date) -> int:
-        """Number of trading days in the closed interval ``[start, end]``."""
-        return sum(1 for day in self.get_trade_dates() if start <= day <= end)
+    def refresh(self) -> List[date]:
+        """Drop the cached calendar and reload it from the source."""
+        return self.get_trade_dates(refresh=True)
 
-    def as_callable(self) -> Callable[[date, date], int]:
-        """Return ``(start, end) -> int`` for injection as ``trading_days``."""
+    def count_between(self, start: date, end: date) -> Optional[int]:
+        """Number of trading days in ``[start, end]``, or ``None`` when the
+        calendar cannot prove it covers the whole window (empty/partial/expired).
+        """
+        dates = self.get_trade_dates()
+        if not dates:
+            return None  # empty calendar -> coverage unknown
+        if dates[0] > start or dates[-1] < end:
+            return None  # calendar does not bracket the window -> coverage unknown
+        return sum(1 for day in dates if start <= day <= end)
+
+    def as_callable(self) -> Callable[[date, date], Optional[int]]:
+        """Return ``(start, end) -> Optional[int]`` for injection as ``trading_days``."""
         return self.count_between
 
     @staticmethod

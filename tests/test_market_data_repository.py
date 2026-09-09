@@ -264,6 +264,138 @@ def test_daily_persistence_roundtrip_uses_decimal_precision():
         assert result.change_pct == round(0.023456789, 6)
 
 
+def _high_precision_frame(n, start_date):
+    dates = [start_date + timedelta(days=i) for i in range(n)]
+    return pd.DataFrame(
+        {
+            "stock_code": [STOCK_CODE] * n,
+            "trade_date": dates,
+            "open": [100.1234567] * n,
+            "high": [110.9876543] * n,
+            "low": [90.1234567] * n,
+            "close": [105.9876543] * n,
+            "volume": [1000] * n,
+            "amount": [100000.1234567] * n,
+            "turnover_rate": [0.0123456789] * n,
+            "change_pct": [0.023456789] * n,
+        }
+    )
+
+
+def test_first_query_and_cache_hit_return_identical_rounded_rows():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+
+        class HighPrecisionProvider:
+            def get_daily_kline(self, stock_code, start_date, end_date, adjust="qfq"):
+                return _high_precision_frame(60, start_date)
+
+        service = MarketDataService(
+            stock_service=StockService(provider=HighPrecisionProvider()), repository=repository
+        )
+
+        first = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
+        second = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
+
+        # First fetch (sync_daily) and cache hit feed the identical rounded data
+        # to the quant module, so scores/trades cannot differ between the two.
+        assert first == second
+        assert first[0].close == round(105.9876543, 4)
+
+
+def test_query_daily_refetches_when_cache_has_nonpositive_price():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        rows = [_bar(STOCK_CODE, start + timedelta(days=i)) for i in range(59)]
+        rows.append(
+            DailyKlineSchema(
+                stock_code=STOCK_CODE,
+                trade_date=start + timedelta(days=59),
+                open=0.0,  # invalid: non-positive price
+                high=110.0,
+                low=90.0,
+                close=105.0,
+                volume=1000,
+                amount=100000.0,
+                turnover_rate=0.01,
+                change_pct=0.02,
+            )
+        )
+        repository.upsert_daily(rows)
+
+        provider = RecordingProvider(60)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
+
+        rows_out = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, max_stale_days=3
+        )
+
+        assert len(provider.calls) == 1  # price<=0 in cache -> refetch
+        assert all(r.open > 0 and r.close > 0 for r in rows_out)
+
+
+def test_query_daily_refetches_when_cache_has_null_volume():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        rows = [_bar(STOCK_CODE, start + timedelta(days=i)) for i in range(59)]
+        rows.append(
+            DailyKlineSchema(
+                stock_code=STOCK_CODE,
+                trade_date=start + timedelta(days=59),
+                open=100.0,
+                high=110.0,
+                low=90.0,
+                close=105.0,
+                volume=None,  # invalid: null volume
+                amount=100000.0,
+                turnover_rate=0.01,
+                change_pct=0.02,
+            )
+        )
+        repository.upsert_daily(rows)
+
+        provider = RecordingProvider(60)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
+
+        rows_out = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, max_stale_days=3
+        )
+
+        assert len(provider.calls) == 1  # null volume in cache -> refetch
+        assert all(r.volume is not None and r.volume >= 0 for r in rows_out)
+
+
+def test_query_daily_refetches_when_cache_has_internal_gap():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        rows = []
+        for i in range(40):
+            rows.append(_bar(STOCK_CODE, start + timedelta(days=i)))
+        for i in range(60, 80):  # drops days 40..59 (a 21-day internal gap)
+            rows.append(_bar(STOCK_CODE, start + timedelta(days=i)))
+        repository.upsert_daily(rows)
+
+        provider = RecordingProvider(60)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
+
+        rows_out = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=79), min_rows=60, max_stale_days=3
+        )
+
+        assert len(provider.calls) == 1  # internal gap -> refetch
+        assert len(rows_out) >= 60
+
+
 def test_query_daily_raises_40003_when_provider_still_returns_too_few():
     with _session() as session:
         repository = MarketDataRepository(session)

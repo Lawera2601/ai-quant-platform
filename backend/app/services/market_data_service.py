@@ -17,7 +17,7 @@ stable business error instead of a raw driver exception.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import List, Optional, Sequence
+from typing import List, Optional, Protocol, Sequence
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -27,6 +27,36 @@ from backend.app.models.stock_basic import StockBasic
 from backend.app.models.stock_daily import StockDaily
 from backend.app.schemas.stock import DailyKlineSchema, StockBasicSchema
 from backend.app.services.stock_service import DEFAULT_MIN_KLINE_ROWS, StockService
+
+#: A cache is considered fresh only if its latest bar is within this many days
+#: of the requested ``end_date`` (also covers the earliest-bar gap to ``start``).
+DEFAULT_MAX_STALE_DAYS = 3
+
+
+class MarketDataSource(Protocol):
+    """Injectable market-data source consumed by the AI pipeline / API layer."""
+
+    def query_daily(
+        self,
+        stock_code: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        min_rows: int = DEFAULT_MIN_KLINE_ROWS,
+        max_stale_days: int = DEFAULT_MAX_STALE_DAYS,
+    ) -> List[DailyKlineSchema]:
+        """Return a >= ``min_rows`` valid qfq daily window, filling the cache
+        from the provider when the cached range is incomplete or stale."""
+        ...
+
+    def sync_daily(
+        self,
+        stock_code: str,
+        start_date: date,
+        end_date: date,
+        min_rows: int = DEFAULT_MIN_KLINE_ROWS,
+    ) -> List[DailyKlineSchema]:
+        """Fetch + clean + widen via ``StockService``, then upsert into MySQL."""
+        ...
 
 
 class MarketDataRepository:
@@ -172,20 +202,42 @@ class MarketDataService:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         min_rows: int = DEFAULT_MIN_KLINE_ROWS,
+        max_stale_days: int = DEFAULT_MAX_STALE_DAYS,
     ) -> List[DailyKlineSchema]:
-        """Query MySQL first, treating the cache as a full hit only when it has
-        at least ``min_rows`` bars in the requested window.
+        """Query MySQL first, treating the cache as a full hit only when it is
+        (a) at least ``min_rows`` bars, (b) covers the start of the requested
+        range, and (c) fresh relative to ``end_date`` (within ``max_stale_days``).
 
         Otherwise it fetches via :class:`StockService` (which cleans and widens
         the window to guarantee ``min_rows`` valid rows) and upserts the result.
         Raises ``InsufficientStockDataError`` (40003) when even the widest fetch
-        cannot produce ``min_rows`` valid rows; ``StockNotFoundError`` (40002)
-        is never raised here because the provider is always consulted.
+        cannot produce ``min_rows`` valid rows.
         """
         end_date = end_date or date.today()
         start_date = start_date or (end_date - timedelta(days=366))
         if self._repository is not None:
             cached = self._repository.list_daily(stock_code, start_date, end_date)
-            if len(cached) >= min_rows:
+            if self._is_cache_complete(cached, start_date, end_date, min_rows, max_stale_days):
                 return cached
         return self.sync_daily(stock_code, start_date, end_date, min_rows=min_rows)
+
+    @staticmethod
+    def _is_cache_complete(
+        cached: Sequence[DailyKlineSchema],
+        start: date,
+        end: date,
+        min_rows: int,
+        max_stale_days: int,
+    ) -> bool:
+        """True when the cached window has enough bars, reaches back to ``start``
+        and ends within ``max_stale_days`` of ``end`` (freshness).
+        """
+        if len(cached) < min_rows:
+            return False
+        first = cached[0].trade_date
+        last = cached[-1].trade_date
+        if (first - start).days > max_stale_days:
+            return False  # cache does not cover the beginning of the range
+        if (end - last).days > max_stale_days:
+            return False  # cache is stale relative to the requested end
+        return True

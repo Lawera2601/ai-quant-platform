@@ -145,9 +145,50 @@ def test_query_daily_serves_complete_cache_without_refetch():
             stock_service=StockService(provider=FailingProvider()), repository=repository
         )
 
-        rows = service.query_daily(STOCK_CODE, start, start + timedelta(days=400), min_rows=60)
+        # Query the exact range the cache covers so it counts as complete+fresh.
+        rows = service.query_daily(STOCK_CODE, start, start + timedelta(days=59), min_rows=60)
 
         assert len(rows) == 60
+
+
+def test_query_daily_refetches_when_cache_is_stale():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        # 60 bars, but the latest is far behind the requested end_date.
+        repository.upsert_daily([_bar(STOCK_CODE, start + timedelta(days=i)) for i in range(60)])
+
+        provider = RecordingProvider(60)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
+
+        rows = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=79), min_rows=60, max_stale_days=3
+        )
+
+        assert len(provider.calls) == 1  # stale (last bar 20d before end) -> refetch
+        assert len(rows) >= 60
+
+
+def test_query_daily_refetches_when_cache_does_not_cover_start_of_range():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        # Bars do not reach back to ``start`` (earliest is 10 days later).
+        repository.upsert_daily([_bar(STOCK_CODE, start + timedelta(days=10 + i)) for i in range(60)])
+
+        provider = RecordingProvider(60)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
+
+        rows = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=69), min_rows=60, max_stale_days=3
+        )
+
+        assert len(provider.calls) == 1  # first bar is 10d after start -> refetch
+        assert len(rows) >= 60
 
 
 def test_query_daily_raises_40003_when_provider_still_returns_too_few():

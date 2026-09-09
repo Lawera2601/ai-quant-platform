@@ -57,6 +57,19 @@ def test_metadata_resolution_falls_back_to_metadata_star(tmp_path):
     assert mod.resolve_metadata_path(tmp_path) == tmp_path / "metadata(1).json"
 
 
+def test_metadata_resolution_errors_on_multiple_star_files(tmp_path):
+    (tmp_path / "metadata(1).json").write_text("{}", encoding="utf-8")
+    (tmp_path / "metadata(2).json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        mod.resolve_metadata_path(tmp_path)
+
+
+def test_metadata_resolution_errors_when_none_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        mod.resolve_metadata_path(tmp_path)
+
+
 def test_metadata_resolution_explicit_wins(tmp_path):
     (tmp_path / "metadata.json").write_text("{}", encoding="utf-8")
     explicit = tmp_path / "custom.json"

@@ -41,8 +41,9 @@ def file_sha256(path: Path) -> str:
 
 
 def resolve_metadata_path(frozen_dir: Path, explicit: Optional[str] = None) -> Path:
-    """Default to ``metadata.json``; otherwise fall back to a single
-    ``metadata*.json``; an explicit ``--metadata`` always wins."""
+    """Default to ``metadata.json``; only fall back when there is exactly one
+    ``metadata*.json``. An explicit ``--metadata`` always wins. When multiple
+    ``metadata*.json`` exist (and no ``metadata.json``), require ``--metadata``."""
     if explicit:
         return Path(explicit)
     default = frozen_dir / "metadata.json"
@@ -51,8 +52,12 @@ def resolve_metadata_path(frozen_dir: Path, explicit: Optional[str] = None) -> P
     candidates = sorted(p for p in frozen_dir.glob("metadata*.json") if p.is_file())
     if len(candidates) == 1:
         return candidates[0]
-    if candidates:
-        return candidates[0]
+    if len(candidates) > 1:
+        raise SystemExit(
+            "[verify] multiple metadata files found: "
+            + ", ".join(c.name for c in candidates)
+            + "; use --metadata to specify one"
+        )
     raise FileNotFoundError(f"no metadata.json found in {frozen_dir}")
 
 

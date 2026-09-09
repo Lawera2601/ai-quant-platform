@@ -16,6 +16,7 @@ stable business error instead of a raw driver exception.
 
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 from typing import List, Optional, Protocol, Sequence
 
@@ -31,6 +32,14 @@ from backend.app.services.stock_service import DEFAULT_MIN_KLINE_ROWS, StockServ
 #: A cache is considered fresh only if its latest bar is within this many days
 #: of the requested ``end_date`` (also covers the earliest-bar gap to ``start``).
 DEFAULT_MAX_STALE_DAYS = 3
+
+#: Canonical decimal precision ("口径") for persisted daily bars. Prices are
+#: stored at 4 decimals, amount at 2 and turnover/change at 6, matching the
+#: ``DATABASE_DESIGN.md`` DECIMAL columns. Rounding is applied explicitly in
+#: Python so both MySQL and SQLite round-trip identically (DB-agnostic).
+PRICE_NDIGITS = 4
+AMOUNT_NDIGITS = 2
+PERCENT_NDIGITS = 6
 
 
 class MarketDataSource(Protocol):
@@ -105,22 +114,26 @@ class MarketDataRepository:
             raise DatabaseOperationError() from exc
 
     def upsert_daily(self, rows: Sequence[DailyKlineSchema]) -> int:
-        """Insert or update daily bars keyed by ``(stock_code, trade_date)``."""
+        """Insert or update daily bars keyed by ``(stock_code, trade_date)``.
+
+        Numeric fields are rounded to the canonical precision (see module docs)
+        before writing, so the DB round-trip is deterministic on MySQL and SQLite.
+        """
         try:
             count = 0
             for row in rows:
+                fields = self._rounded_daily_fields(row)
                 record = (
                     self._session.query(StockDaily)
                     .filter_by(stock_code=row.stock_code, trade_date=row.trade_date)
                     .one_or_none()
                 )
                 if record is None:
-                    self._session.add(StockDaily(**row.model_dump()))
+                    self._session.add(StockDaily(**fields))
                 else:
-                    payload = row.model_dump()
-                    payload.pop("stock_code", None)
-                    payload.pop("trade_date", None)
-                    for field, value in payload.items():
+                    fields.pop("stock_code", None)
+                    fields.pop("trade_date", None)
+                    for field, value in fields.items():
                         setattr(record, field, value)
                 count += 1
             self._session.commit()
@@ -150,19 +163,60 @@ class MarketDataRepository:
             raise DatabaseOperationError() from exc
 
     @staticmethod
+    def _rounded_daily_fields(row: DailyKlineSchema) -> dict:
+        return {
+            "stock_code": row.stock_code,
+            "trade_date": row.trade_date,
+            "open": MarketDataRepository._round_value(row.open, PRICE_NDIGITS),
+            "high": MarketDataRepository._round_value(row.high, PRICE_NDIGITS),
+            "low": MarketDataRepository._round_value(row.low, PRICE_NDIGITS),
+            "close": MarketDataRepository._round_value(row.close, PRICE_NDIGITS),
+            "volume": row.volume,
+            "amount": MarketDataRepository._round_value(row.amount, AMOUNT_NDIGITS),
+            "turnover_rate": MarketDataRepository._round_value(row.turnover_rate, PERCENT_NDIGITS),
+            "change_pct": MarketDataRepository._round_value(row.change_pct, PERCENT_NDIGITS),
+        }
+
+    @staticmethod
+    def _round_value(value, ndigits: int):
+        return round(value, ndigits) if value is not None else None
+
+    @staticmethod
     def _to_schema(record: StockDaily) -> DailyKlineSchema:
         return DailyKlineSchema(
             stock_code=record.stock_code,
             trade_date=record.trade_date,
-            open=record.open,
-            high=record.high,
-            low=record.low,
-            close=record.close,
+            open=MarketDataRepository._round_value(record.open, PRICE_NDIGITS),
+            high=MarketDataRepository._round_value(record.high, PRICE_NDIGITS),
+            low=MarketDataRepository._round_value(record.low, PRICE_NDIGITS),
+            close=MarketDataRepository._round_value(record.close, PRICE_NDIGITS),
             volume=record.volume,
-            amount=record.amount,
-            turnover_rate=record.turnover_rate,
-            change_pct=record.change_pct,
+            amount=MarketDataRepository._round_value(record.amount, AMOUNT_NDIGITS),
+            turnover_rate=MarketDataRepository._round_value(record.turnover_rate, PERCENT_NDIGITS),
+            change_pct=MarketDataRepository._round_value(record.change_pct, PERCENT_NDIGITS),
         )
+
+    @staticmethod
+    def _cached_rows_valid(cached: Sequence[DailyKlineSchema]) -> bool:
+        """True when every cached bar has finite OHLC meeting OHLC ordering and
+        a non-negative volume. Invalid rows must not be treated as a full hit.
+        """
+        for row in cached:
+            for field in ("open", "high", "low", "close"):
+                value = getattr(row, field)
+                if value is None or not math.isfinite(value):
+                    return False
+            if (
+                row.high < row.open
+                or row.high < row.close
+                or row.low > row.open
+                or row.low > row.close
+                or row.high < row.low
+            ):
+                return False
+            if row.volume is not None and row.volume < 0:
+                return False
+        return True
 
 
 class MarketDataService:
@@ -229,11 +283,14 @@ class MarketDataService:
         min_rows: int,
         max_stale_days: int,
     ) -> bool:
-        """True when the cached window has enough bars, reaches back to ``start``
-        and ends within ``max_stale_days`` of ``end`` (freshness).
+        """True when the cached window has enough bars, all bars are valid (finite
+        OHLC ordering, non-negative volume), it reaches back to ``start``, and it
+        ends within ``max_stale_days`` of ``end`` (freshness).
         """
         if len(cached) < min_rows:
             return False
+        if not MarketDataRepository._cached_rows_valid(cached):
+            return False  # invalid cached bars must not count as a full hit
         first = cached[0].trade_date
         last = cached[-1].trade_date
         if (first - start).days > max_stale_days:

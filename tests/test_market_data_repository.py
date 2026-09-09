@@ -191,6 +191,79 @@ def test_query_daily_refetches_when_cache_does_not_cover_start_of_range():
         assert len(rows) >= 60
 
 
+def _invalid_bar(stock_code, trade_date):
+    """A bar with illegal OHLC (high < open/low) that must never be a full hit."""
+    return DailyKlineSchema(
+        stock_code=stock_code,
+        trade_date=trade_date,
+        open=100.0,
+        high=80.0,
+        low=90.0,
+        close=105.0,
+        volume=1000,
+        amount=100000.0,
+        turnover_rate=0.01,
+        change_pct=0.02,
+    )
+
+
+def test_query_daily_refetches_when_cache_contains_invalid_ohlc():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        start = date(2025, 1, 1)
+        rows = [_bar(STOCK_CODE, start + timedelta(days=i)) for i in range(59)]
+        rows.append(_invalid_bar(STOCK_CODE, start + timedelta(days=59)))  # 60 rows, 1 invalid
+
+        repository.upsert_daily(rows)
+        provider = RecordingProvider(60)
+        service = MarketDataService(
+            stock_service=StockService(provider=provider), repository=repository
+        )
+
+        rows_out = service.query_daily(
+            STOCK_CODE, start, start + timedelta(days=59), min_rows=60, max_stale_days=3
+        )
+
+        assert len(provider.calls) == 1  # 60 rows but invalid bar -> refetch
+        assert all(
+            r.high >= r.open
+            and r.high >= r.close
+            and r.low <= r.open
+            and r.low <= r.close
+            for r in rows_out
+        )
+
+
+def test_daily_persistence_roundtrip_uses_decimal_precision():
+    with _session() as session:
+        repository = MarketDataRepository(session)
+        trade_date = date(2025, 1, 1)
+        bar = DailyKlineSchema(
+            stock_code=STOCK_CODE,
+            trade_date=trade_date,
+            open=100.1234567,
+            high=110.9876543,
+            low=90.1234567,
+            close=105.9876543,
+            volume=1000,
+            amount=100000.1234567,
+            turnover_rate=0.0123456789,
+            change_pct=0.023456789,
+        )
+
+        repository.upsert_daily([bar])
+
+        back = repository.list_daily(STOCK_CODE, trade_date, trade_date)
+        result = back[0]
+        assert result.open == round(100.1234567, 4)
+        assert result.high == round(110.9876543, 4)
+        assert result.low == round(90.1234567, 4)
+        assert result.close == round(105.9876543, 4)
+        assert result.amount == round(100000.1234567, 2)
+        assert result.turnover_rate == round(0.0123456789, 6)
+        assert result.change_pct == round(0.023456789, 6)
+
+
 def test_query_daily_raises_40003_when_provider_still_returns_too_few():
     with _session() as session:
         repository = MarketDataRepository(session)

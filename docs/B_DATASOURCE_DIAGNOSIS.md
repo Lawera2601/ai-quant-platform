@@ -36,6 +36,11 @@ $env:PYTHONIOENCODING='utf-8'
 3. **代理因素**：本机 WinINET 启用了系统代理 `127.0.0.1:7892`（Clash），`requests` 默认 `trust_env=True` 会对所有主机使用该代理；该代理对 `push2*.eastmoney.com` 不稳定（SSL/Proxy/502），而 `search-api-web` 稳定。
    验证：`requests.utils.get_environ_proxies('<host>')` 返回 `{'https': 'http://127.0.0.1:7892'}`。
 
+## 3.1 重要线索：延迟行情主机可用
+
+实测 `push2.eastmoney.com` 连续 20 次 HTTP 502 时，同族**延迟行情主机 `push2delay.eastmoney.com` 返回 HTTP 200**，同一接口给出 600519 真实数据（贵州茅台 / 白酒Ⅱ / 总市值·流通市值）。
+→ 股票基础信息的实时获取可考虑切到 `push2delay` 主机（或在其恢复前用它做只读快照采集，本次冻结包的股票快照即由此采集，证据见包内 `stock_basic_600519.raw.json` 与 provenance）。
+
 ## 4. 不含凭据的配置建议
 
 - **优先**：确认本地代理（Clash `127.0.0.1:7892`）正常运行，且对其规则/节点到 `*.eastmoney.com`、`*.sina.com.cn` 稳定；`push2*` 与 `search-api-web` 需分别可用。

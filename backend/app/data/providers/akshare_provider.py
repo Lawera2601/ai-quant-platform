@@ -227,10 +227,14 @@ class AKShareStockProvider(StockDataProvider):
 
         Used only when the primary ``push2`` host fails after retries; the field
         mapping (``f57/f58/f116/f117/f127``) is identical to
-        ``stock_individual_info_em``, so the returned口径 is unchanged.
+        ``stock_individual_info_em``. Response structure, business status (``rc``)
+        and required fields are validated; any anomaly maps to 50001.
         """
         import requests
 
+        failure = StockDataProviderError(
+            f"AKShare info request failed for {stock_code}: {cause}"
+        )
         market = "1" if stock_code.startswith("6") else "0"
         try:
             response = requests.get(
@@ -243,19 +247,22 @@ class AKShareStockProvider(StockDataProvider):
                 },
                 timeout=self.fallback_timeout_seconds,
             )
-            data = (response.json() or {}).get("data") or {}
+            payload = response.json()
         except Exception as exc:
-            raise StockDataProviderError(
-                f"AKShare info request failed for {stock_code}: {cause}"
-            ) from exc
+            raise failure from exc
 
-        if not data:
-            raise StockDataProviderError(
-                f"AKShare info request failed for {stock_code}: {cause}"
-            )
+        if not isinstance(payload, dict) or payload.get("rc", 0) != 0:
+            raise failure
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise failure
+        code = self._cell_text(data.get("f57"))
+        name = self._cell_text(data.get("f58"))
+        if not code or not name:
+            raise failure
         return {
-            "stock_code": str(data.get("f57") or stock_code),
-            "stock_name": self._cell_text(data.get("f58")) or stock_code,
+            "stock_code": code,
+            "stock_name": name,
             "industry": self._cell_text(data.get("f127")),
             "total_market_cap": self._cell_float(data.get("f116")),
             "float_market_cap": self._cell_float(data.get("f117")),
@@ -272,6 +279,9 @@ class AKShareStockProvider(StockDataProvider):
         """Fallback qfq daily kline from the same-source delayed-quote host."""
         import requests
 
+        failure = StockDataProviderError(
+            f"AKShare request failed for {stock_code}: {cause}"
+        )
         market = "1" if stock_code.startswith("6") else "0"
         try:
             response = requests.get(
@@ -287,24 +297,29 @@ class AKShareStockProvider(StockDataProvider):
                 },
                 timeout=self.fallback_timeout_seconds,
             )
-            data = (response.json() or {}).get("data") or {}
+            payload = response.json()
         except Exception as exc:
-            raise StockDataProviderError(
-                f"AKShare request failed for {stock_code}: {cause}"
-            ) from exc
+            raise failure from exc
 
-        klines = data.get("klines") or []
-        if not klines:
+        if not isinstance(payload, dict) or payload.get("rc", 0) != 0:
+            raise failure
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise failure
+        klines = data.get("klines")
+        if not isinstance(klines, list) or not klines:
             # A data-source failure must surface as 50001, never be masked as
             # "empty history" (which StockService would turn into 40003).
-            raise StockDataProviderError(
-                f"AKShare request failed for {stock_code}: {cause}"
-            )
+            raise failure
         rows = []
         for line in klines:
             parts = str(line).split(",")
             if len(parts) < 11:
-                continue
+                # A truncated upstream row means a corrupt payload: fail loudly
+                # (50001) rather than silently dropping bars.
+                raise StockDataSchemaError(
+                    f"delayed host daily kline row is malformed for {stock_code}"
+                )
             rows.append(
                 {
                     "日期": parts[0],

@@ -47,7 +47,8 @@ $env:PYTHONIOENCODING='utf-8'
 - **超时与总预算（保证快速失败）**：单次 AKShare 调用超时 `call_timeout_seconds=3s`，整段重试总预算 `retry_total_budget_seconds=4s`，回退请求超时 `fallback_timeout_seconds=3s`；超预算立即放弃并返回 `50001`（端到端 ≤ ~7s），避免 `search` 这类全市场分页抓取把请求挂到 15s+（前端 10s 超时只会误报「网络错误」）。
 - **同源延迟主机回退**：主站失败后回退到 `push2delay.eastmoney.com`（同为 eastmoney、同接口同字段口径）：
   - 股票信息 `/api/qt/stock/get`（实测可用：`GET /stocks/{code}` 由 50001 恢复为 200）；
-  - 日线 `/api/qt/stock/kline/get`；**空响应时抛 `StockDataProviderError`（50001）**，不伪装成「无数据/40003」。
+  - 日线 `/api/qt/stock/kline/get`；**空响应时抛 `StockDataProviderError`（50001）**，不伪装成「无数据/40003」；**上游报文畸形行（列数不足）抛 `StockDataSchemaError`（50001）**，不静默跳过。
+  - 回退响应统一做**结构/业务状态（`rc`）/必填字段校验**：非 dict、`rc!=0`、缺 `f57/f58` 等一律 `50001`，不返回 `code=0` 的半成品、也不抛裸 500。
   - 搜索**不加回退**：延迟主机 clist 单页上限 100，无法覆盖全表，回退会给出误导性的空结果；故搜索在主站故障时**如实返回 `50001`**。
 - **实测限制（重要）**：延迟主机对**长历史区间**有限制（长区间 kline 常返回空）；且**高频访问后被 eastmoney 限流**（随后各主机均可能返回空或断连）。故实时链路仍可能 `50001`，**建议低频、少量重试**，不要持续密集探测。
 - 未改数据源字段口径与错误码；数据源错误一律 `50001`、不伪装为空数据；冻结链路完全不受影响。

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from backend.app.data.providers.akshare_provider import AKShareStockProvider
-from backend.app.data.providers.base import StockDataProviderError
+from backend.app.data.providers.base import StockDataProviderError, StockDataSchemaError
 
 
 def _kline_frame():
@@ -53,20 +53,29 @@ def test_kline_retries_transient_error_then_succeeds(monkeypatch):
 
 
 def test_kline_raises_after_retries_exhausted(monkeypatch):
+    import requests
+
     monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
     monkeypatch.setattr(AKShareStockProvider, "retry_attempts", 3)
-    calls = {"n": 0}
+    monkeypatch.setattr(AKShareStockProvider, "retry_total_budget_seconds", 30)
+    calls = {"hist": 0, "fallback": 0}
 
     def hist(**kwargs):
-        calls["n"] += 1
+        calls["hist"] += 1
         raise ConnectionError("connection reset")
 
+    def failing_get(*args, **kwargs):
+        calls["fallback"] += 1
+        raise ConnectionError("fallback down")
+
     monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_hist=hist))
+    monkeypatch.setattr(requests, "get", failing_get)  # isolate the fallback request
 
     with pytest.raises(StockDataProviderError):
         AKShareStockProvider().get_daily_kline("600519", date(2025, 1, 1), date(2025, 1, 5))
 
-    assert calls["n"] == 3  # bounded attempts
+    assert calls["hist"] == 3  # bounded primary attempts
+    assert calls["fallback"] == 1  # fallback attempted exactly once, no real network
 
 
 def test_stock_info_falls_back_to_delayed_host(monkeypatch):
@@ -175,4 +184,81 @@ def test_call_budget_returns_quickly_when_upstream_hangs(monkeypatch):
     elapsed = _time.monotonic() - start
 
     assert elapsed < 2.0  # bounded, must not hang for the full retry budget chain
+
+
+def _response_with(payload):
+    class _Response:
+        def json(self):
+            return payload
+
+    return _Response()
+
+
+def test_stock_info_fallback_rejects_non_dict_data(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+
+    def info(**kwargs):
+        raise ConnectionError("connection reset")
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_individual_info_em=info))
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _response_with({"data": [1]}))
+
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_stock_info("600519")
+
+
+def test_stock_info_fallback_rejects_nonzero_rc(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+
+    def info(**kwargs):
+        raise ConnectionError("connection reset")
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_individual_info_em=info))
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with({"rc": -1, "data": {"error": "upstream throttled"}}),
+    )
+
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_stock_info("600519")
+
+
+def test_stock_info_fallback_rejects_missing_required_fields(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+
+    def info(**kwargs):
+        raise ConnectionError("connection reset")
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_individual_info_em=info))
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _response_with({"rc": 0, "data": {}}))
+
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_stock_info("600519")
+
+
+def test_kline_fallback_rejects_malformed_row(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+
+    def hist(**kwargs):
+        raise ConnectionError("connection reset")
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_hist=hist))
+
+    good = "2025-01-02,100.0,105.0,110.0,90.0,1000,100000.0,5.0,0.5,0.5,1.0"
+    malformed = "2025-01-03,101.0,106.0"  # only 3 columns -> corrupt upstream row
+    monkeypatch.setattr(
+        requests, "get", lambda *a, **k: _response_with({"rc": 0, "data": {"klines": [good, malformed]}})
+    )
+
+    with pytest.raises(StockDataSchemaError):
+        AKShareStockProvider().get_daily_kline("600519", date(2025, 1, 1), date(2025, 1, 5))
 

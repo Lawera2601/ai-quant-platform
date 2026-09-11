@@ -62,8 +62,10 @@ class AKShareStockProvider(StockDataProvider):
     retry_delay_seconds = 0.5
     #: Bound the wall-clock time of a single AKShare call and of the whole retry
     #: sequence, so a hung upstream returns 50001 quickly instead of hanging.
-    call_timeout_seconds = 6.0
-    retry_total_budget_seconds = 8.0
+    call_timeout_seconds = 3.0
+    retry_total_budget_seconds = 4.0
+    #: Timeout for the same-source fallback request (keeps total bounded).
+    fallback_timeout_seconds = 3.0
     #: Same-source delayed-quote host used only as a fallback when the primary
     #: eastmoney hosts fail after retries (identical endpoints and field口径).
     delayed_base_url = "https://push2delay.eastmoney.com"
@@ -239,7 +241,7 @@ class AKShareStockProvider(StockDataProvider):
                     "fields": "f57,f58,f116,f117,f127",
                     "secid": f"{market}.{stock_code}",
                 },
-                timeout=10,
+                timeout=self.fallback_timeout_seconds,
             )
             data = (response.json() or {}).get("data") or {}
         except Exception as exc:
@@ -283,7 +285,7 @@ class AKShareStockProvider(StockDataProvider):
                     "beg": start_date.strftime("%Y%m%d"),
                     "end": end_date.strftime("%Y%m%d"),
                 },
-                timeout=15,
+                timeout=self.fallback_timeout_seconds,
             )
             data = (response.json() or {}).get("data") or {}
         except Exception as exc:

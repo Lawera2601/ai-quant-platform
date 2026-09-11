@@ -41,11 +41,20 @@ $env:PYTHONIOENCODING='utf-8'
 实测 `push2.eastmoney.com` 连续 20 次 HTTP 502 时，同族**延迟行情主机 `push2delay.eastmoney.com` 返回 HTTP 200**，同一接口给出 600519 真实数据（贵州茅台 / 白酒Ⅱ / 总市值·流通市值）。
 → 股票基础信息的实时获取可考虑切到 `push2delay` 主机（或在其恢复前用它做只读快照采集，本次冻结包的股票快照即由此采集，证据见包内 `stock_basic_600519.raw.json` 与 provenance）。
 
+## 3.2 已实施的同源容错
+
+- **有限重试 + 退避**：对**瞬时网络/解析错误**（`OSError` 派生：`ConnectionError`/`SSLError`/`ProxyError`/`Timeout`；以及 502 HTML 触发的 `JSONDecodeError`）自动重试（默认 3 次）。
+- **同源延迟主机回退**：主站失败后回退到 `push2delay.eastmoney.com`（同为 eastmoney、同接口同字段口径）：
+  - 股票信息 `/api/qt/stock/get`（实测可用：`GET /stocks/{code}` 曾由 50001 恢复为 200）；
+  - 日线 `/api/qt/stock/kline/get`；搜索 `/api/qt/clist/get`。
+- **实测限制（重要）**：延迟主机对**长历史区间**与**整表分页**有限制（clist 单页上限 100；长区间 kline 返回空）；且**高频访问后被 eastmoney 限流**（随后长短区间/各主机均可能返回空或断连）。故实时链路仍可能 `50001`，**建议低频、少量重试**，不要持续密集探测。
+- 未改数据源字段口径与错误码；冻结链路完全不受影响。
+
 ## 4. 不含凭据的配置建议
 
 - **优先**：确认本地代理（Clash `127.0.0.1:7892`）正常运行，且对其规则/节点到 `*.eastmoney.com`、`*.sina.com.cn` 稳定；`push2*` 与 `search-api-web` 需分别可用。
 - 若存在**直连可用**的通路，可对这两个域**绕过代理**（`NO_PROXY=eastmoney.com,sina.com.cn`）；本环境实测直连同样失败，需按实际网络确认。
-- **重试**：这两类失败为间歇性，建议调用侧对 `StockDataProviderError` 做有限次数重试（B 的冻结/实时入口已按请求级；是否在 Provider 内加重试待与 D 确认）。
+- **重试**：这两类失败为间歇性；Provider 现已内置有限重试 + 同源延迟主机回退（见 3.2）。
 - **不要**把数据源错误降级为空数据；B 保持 `50001`。
 
 ## 5. 契约

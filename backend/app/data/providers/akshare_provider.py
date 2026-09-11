@@ -1,7 +1,8 @@
+import json
+import math
+import time
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List
-
-import math
 
 import pandas as pd
 
@@ -12,6 +13,11 @@ from backend.app.data.providers.base import (
     StockDataProviderError,
     StockDataSchemaError,
 )
+
+#: Transient network/parse failures worth retrying: eastmoney connections are
+#: intermittently dropped/reset on some networks. ``requests`` exceptions all
+#: derive from ``OSError``; a 502 HTML body surfaces as ``JSONDecodeError``.
+_TRANSIENT_ERRORS = (OSError, json.JSONDecodeError)
 
 
 class AKShareStockProvider(StockDataProvider):
@@ -50,6 +56,25 @@ class AKShareStockProvider(StockDataProvider):
     required_news_source_fields = ("新闻标题", "新闻内容", "文章来源", "新闻链接")
     news_output_columns = ("stock_code", "title", "summary", "source", "publish_time", "url")
 
+    #: Bounded retry for transient network/parse failures (same source, same fields).
+    retry_attempts = 3
+    retry_delay_seconds = 0.5
+    #: Same-source delayed-quote host used only as a fallback when the primary
+    #: eastmoney hosts fail after retries (identical endpoints and field口径).
+    delayed_base_url = "https://push2delay.eastmoney.com"
+
+    def _call_with_retry(self, call):
+        """Call ``call`` with bounded retries on transient network/parse errors."""
+        last_exc = None
+        for attempt in range(max(1, int(self.retry_attempts))):
+            try:
+                return call()
+            except _TRANSIENT_ERRORS as exc:
+                last_exc = exc
+                if attempt < self.retry_attempts - 1:
+                    time.sleep(self.retry_delay_seconds * (attempt + 1))
+        raise last_exc
+
     def get_daily_kline(
         self,
         stock_code: str,
@@ -65,15 +90,21 @@ class AKShareStockProvider(StockDataProvider):
         try:
             import akshare as ak
 
-            raw_data = ak.stock_zh_a_hist(
-                symbol=stock_code,
-                period="daily",
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust=adjust,
+            raw_data = self._call_with_retry(
+                lambda: ak.stock_zh_a_hist(
+                    symbol=stock_code,
+                    period="daily",
+                    start_date=start_date.strftime("%Y%m%d"),
+                    end_date=end_date.strftime("%Y%m%d"),
+                    adjust=adjust,
+                )
             )
         except StockDataProviderError:
             raise
+        except _TRANSIENT_ERRORS as exc:
+            return self._daily_kline_from_delay_host(
+                stock_code, start_date, end_date, adjust, exc
+            )
         except Exception as exc:
             raise StockDataProviderError(f"AKShare request failed for {stock_code}: {exc}") from exc
 
@@ -87,9 +118,11 @@ class AKShareStockProvider(StockDataProvider):
         try:
             import akshare as ak
 
-            raw = ak.stock_zh_a_spot_em()
+            raw = self._call_with_retry(lambda: ak.stock_zh_a_spot_em())
         except StockDataProviderError:
             raise
+        except _TRANSIENT_ERRORS as exc:
+            raw = self._spot_frame_from_delay_host(exc)
         except Exception as exc:
             raise StockDataProviderError(f"AKShare spot request failed: {exc}") from exc
 
@@ -119,9 +152,14 @@ class AKShareStockProvider(StockDataProvider):
         try:
             import akshare as ak
 
-            raw = ak.stock_individual_info_em(symbol=stock_code)
+            raw = self._call_with_retry(
+                lambda: ak.stock_individual_info_em(symbol=stock_code)
+            )
         except StockDataProviderError:
             raise
+        except _TRANSIENT_ERRORS as exc:
+            # Same-source delayed-quote host fallback (identical eastmoney fields).
+            return self._stock_info_from_delay_host(stock_code, exc)
         except Exception as exc:
             raise StockDataProviderError(
                 f"AKShare info request failed for {stock_code}: {exc}"
@@ -146,6 +184,144 @@ class AKShareStockProvider(StockDataProvider):
             "float_market_cap": self._cell_float(kv.get("流通市值")),
         }
 
+    def _stock_info_from_delay_host(
+        self, stock_code: str, cause: Exception
+    ) -> Dict[str, Any]:
+        """Fallback stock info from the same-source delayed-quote host.
+
+        Used only when the primary ``push2`` host fails after retries; the field
+        mapping (``f57/f58/f116/f117/f127``) is identical to
+        ``stock_individual_info_em``, so the returned口径 is unchanged.
+        """
+        import requests
+
+        market = "1" if stock_code.startswith("6") else "0"
+        try:
+            response = requests.get(
+                self.delayed_base_url + "/api/qt/stock/get",
+                params={
+                    "fltt": "2",
+                    "invt": "2",
+                    "fields": "f57,f58,f116,f117,f127",
+                    "secid": f"{market}.{stock_code}",
+                },
+                timeout=10,
+            )
+            data = (response.json() or {}).get("data") or {}
+        except Exception as exc:
+            raise StockDataProviderError(
+                f"AKShare info request failed for {stock_code}: {cause}"
+            ) from exc
+
+        if not data:
+            raise StockDataProviderError(
+                f"AKShare info request failed for {stock_code}: {cause}"
+            )
+        return {
+            "stock_code": str(data.get("f57") or stock_code),
+            "stock_name": self._cell_text(data.get("f58")) or stock_code,
+            "industry": self._cell_text(data.get("f127")),
+            "total_market_cap": self._cell_float(data.get("f116")),
+            "float_market_cap": self._cell_float(data.get("f117")),
+        }
+
+    def _daily_kline_from_delay_host(
+        self,
+        stock_code: str,
+        start_date: date,
+        end_date: date,
+        adjust: str,
+        cause: Exception,
+    ) -> pd.DataFrame:
+        """Fallback qfq daily kline from the same-source delayed-quote host."""
+        import requests
+
+        market = "1" if stock_code.startswith("6") else "0"
+        try:
+            response = requests.get(
+                self.delayed_base_url + "/api/qt/stock/kline/get",
+                params={
+                    "secid": f"{market}.{stock_code}",
+                    "klt": "101",  # daily
+                    "fqt": "1" if adjust == "qfq" else "0",
+                    "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                    "beg": start_date.strftime("%Y%m%d"),
+                    "end": end_date.strftime("%Y%m%d"),
+                },
+                timeout=15,
+            )
+            data = (response.json() or {}).get("data") or {}
+        except Exception as exc:
+            raise StockDataProviderError(
+                f"AKShare request failed for {stock_code}: {cause}"
+            ) from exc
+
+        klines = data.get("klines") or []
+        if not klines:
+            raise EmptyStockDataError(
+                f"delayed host returned no daily kline for {stock_code}"
+            )
+        rows = []
+        for line in klines:
+            parts = str(line).split(",")
+            if len(parts) < 11:
+                continue
+            rows.append(
+                {
+                    "日期": parts[0],
+                    "开盘": parts[1],
+                    "收盘": parts[2],
+                    "最高": parts[3],
+                    "最低": parts[4],
+                    "成交量": parts[5],
+                    "成交额": parts[6],
+                    "涨跌幅": parts[8],
+                    "换手率": parts[10],
+                }
+            )
+        if not rows:
+            raise StockDataSchemaError(
+                f"delayed host daily kline rows are malformed for {stock_code}"
+            )
+        return self._normalize_daily_kline(pd.DataFrame(rows), stock_code)
+
+    def _spot_frame_from_delay_host(self, cause: Exception) -> pd.DataFrame:
+        """Fallback A-share spot list (code/name) from the same-source delayed host."""
+        import requests
+
+        try:
+            response = requests.get(
+                self.delayed_base_url + "/api/qt/clist/get",
+                params={
+                    "pn": "1",
+                    "pz": "6000",
+                    "po": "1",
+                    "np": "1",
+                    "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                    "fltt": "2",
+                    "invt": "2",
+                    "fid": "f12",
+                    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                    "fields": "f12,f14",
+                },
+                timeout=25,
+            )
+            diff = (response.json() or {}).get("data", {}).get("diff") or []
+        except Exception as exc:
+            raise StockDataProviderError(f"AKShare spot request failed: {cause}") from exc
+
+        if isinstance(diff, dict):
+            diff = list(diff.values())
+        rows = [
+            {"代码": str(item.get("f12")), "名称": item.get("f14")}
+            for item in diff
+            if item.get("f12") and item.get("f14")
+        ]
+        if not rows:
+            raise StockDataSchemaError("delayed host spot response is empty")
+        return pd.DataFrame(rows)
+
     def get_stock_news(self, stock_code: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Fetch recent East Money news for a stock and return normalized dicts.
 
@@ -156,7 +332,7 @@ class AKShareStockProvider(StockDataProvider):
         try:
             import akshare as ak
 
-            raw = ak.stock_news_em(symbol=stock_code)
+            raw = self._call_with_retry(lambda: ak.stock_news_em(symbol=stock_code))
         except StockDataProviderError:
             raise
         except Exception as exc:

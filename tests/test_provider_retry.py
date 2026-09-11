@@ -148,3 +148,31 @@ def test_kline_falls_back_to_delayed_host(monkeypatch):
     assert list(frame["trade_date"]) == [date(2025, 1, 2), date(2025, 1, 3)]
     assert list(frame["close"]) == [105.0, 106.0]
 
+
+def test_call_budget_returns_quickly_when_upstream_hangs(monkeypatch):
+    import time as _time
+
+    import requests
+
+    monkeypatch.setattr(AKShareStockProvider, "call_timeout_seconds", 0.2)
+    monkeypatch.setattr(AKShareStockProvider, "retry_total_budget_seconds", 0.5)
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+
+    def hanging_hist(**kwargs):
+        _time.sleep(5)  # upstream hangs
+        return _kline_frame()
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_hist=hanging_hist))
+
+    def failing_get(*args, **kwargs):
+        raise ConnectionError("fallback down")
+
+    monkeypatch.setattr(requests, "get", failing_get)
+
+    start = _time.monotonic()
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_daily_kline("600519", date(2025, 1, 1), date(2025, 1, 5))
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 2.0  # bounded, must not hang for the full retry budget chain
+

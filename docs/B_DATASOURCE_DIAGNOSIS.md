@@ -44,6 +44,7 @@ $env:PYTHONIOENCODING='utf-8'
 ## 3.2 已实施的同源容错
 
 - **有限重试 + 退避**：对**瞬时网络/解析错误**（`OSError` 派生：`ConnectionError`/`SSLError`/`ProxyError`/`Timeout`；以及 502 HTML 触发的 `JSONDecodeError`）自动重试（默认 3 次）。
+- **超时与总预算（保证快速失败）**：单次 AKShare 调用超时 `call_timeout_seconds=6s`，整段重试总预算 `retry_total_budget_seconds=8s`；超预算立即放弃并返回 `50001`，避免 `search` 这类全市场分页抓取把请求挂到 15s+（前端 10s 超时只能报「网络错误」）。
 - **同源延迟主机回退**：主站失败后回退到 `push2delay.eastmoney.com`（同为 eastmoney、同接口同字段口径）：
   - 股票信息 `/api/qt/stock/get`（实测可用：`GET /stocks/{code}` 由 50001 恢复为 200）；
   - 日线 `/api/qt/stock/kline/get`；**空响应时抛 `StockDataProviderError`（50001）**，不伪装成「无数据/40003」。

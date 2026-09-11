@@ -1,5 +1,6 @@
 import json
 import math
+import threading
 import time
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List
@@ -59,20 +60,55 @@ class AKShareStockProvider(StockDataProvider):
     #: Bounded retry for transient network/parse failures (same source, same fields).
     retry_attempts = 3
     retry_delay_seconds = 0.5
+    #: Bound the wall-clock time of a single AKShare call and of the whole retry
+    #: sequence, so a hung upstream returns 50001 quickly instead of hanging.
+    call_timeout_seconds = 6.0
+    retry_total_budget_seconds = 8.0
     #: Same-source delayed-quote host used only as a fallback when the primary
     #: eastmoney hosts fail after retries (identical endpoints and field口径).
     delayed_base_url = "https://push2delay.eastmoney.com"
 
-    def _call_with_retry(self, call):
-        """Call ``call`` with bounded retries on transient network/parse errors."""
-        last_exc = None
-        for attempt in range(max(1, int(self.retry_attempts))):
+    def _call_with_timeout(self, call, timeout):
+        """Run ``call`` in a daemon thread, raising if it exceeds ``timeout`` seconds."""
+        box = {}
+
+        def worker():
             try:
-                return call()
+                box["value"] = call()
+            except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
+                box["error"] = exc
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise TimeoutError(f"AKShare call exceeded {timeout:.1f}s")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def _call_with_retry(self, call):
+        """Bounded retries on transient errors within a total wall-clock budget."""
+        deadline = time.monotonic() + self.retry_total_budget_seconds
+        last_exc = None
+        attempts = max(1, int(self.retry_attempts))
+        for attempt in range(attempts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                return self._call_with_timeout(
+                    call, min(self.call_timeout_seconds, remaining)
+                )
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
-                if attempt < self.retry_attempts - 1:
-                    time.sleep(self.retry_delay_seconds * (attempt + 1))
+                if attempt < attempts - 1:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(self.retry_delay_seconds * (attempt + 1), remaining))
+        if last_exc is None:
+            last_exc = TimeoutError("AKShare call exceeded the retry budget")
         raise last_exc
 
     def get_daily_kline(

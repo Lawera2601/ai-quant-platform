@@ -251,9 +251,18 @@ class AKShareStockProvider(StockDataProvider):
         """
         import requests
 
-        failure = StockDataProviderError(
-            f"AKShare info request failed for {stock_code}: {cause}"
-        )
+        def failure(reason: str) -> StockDataProviderError:
+            """Report the primary failure *and* why the fallback gave up.
+
+            Previously the raised message only repeated ``cause``, which hid the
+            real fallback reason (e.g. an empty/throttled payload) and made
+            operator diagnosis misleading.
+            """
+            return StockDataProviderError(
+                f"AKShare info request failed for {stock_code}: {cause} "
+                f"(delayed-host fallback also failed: {reason})"
+            )
+
         market = "1" if stock_code.startswith("6") else "0"
         try:
             response = requests.get(
@@ -267,28 +276,28 @@ class AKShareStockProvider(StockDataProvider):
                 timeout=self.fallback_timeout_seconds,
             )
             if response.status_code != 200:
-                raise failure
+                raise failure(f"HTTP {response.status_code}")
             payload = response.json()
         except StockDataProviderError:
             raise
         except Exception as exc:
-            raise failure from exc
+            raise failure(f"{type(exc).__name__}: {exc}") from exc
 
         if not isinstance(payload, dict) or payload.get("rc", 0) != 0:
-            raise failure
+            raise failure(f"rc={payload.get('rc') if isinstance(payload, dict) else 'n/a'}")
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise failure
+            raise failure("payload.data is not an object")
         f57 = data.get("f57")
         f58 = data.get("f58")
         if isinstance(f57, bool) or not isinstance(f57, (str, int)):
-            raise failure
+            raise failure("f57 is not a scalar stock code")
         if not isinstance(f58, str) or not f58.strip():
-            raise failure
+            raise failure("f58 is not a non-empty stock name")
         code = str(f57).strip().zfill(6)
         if code != stock_code:
             # Never return a different stock's identity.
-            raise failure
+            raise failure(f"identity mismatch (requested {stock_code}, got {code})")
         return {
             "stock_code": code,
             "stock_name": f58.strip(),
@@ -308,9 +317,13 @@ class AKShareStockProvider(StockDataProvider):
         """Fallback qfq daily kline from the same-source delayed-quote host."""
         import requests
 
-        failure = StockDataProviderError(
-            f"AKShare request failed for {stock_code}: {cause}"
-        )
+        def build_failure(reason: str) -> StockDataProviderError:
+            """Report the primary failure *and* why the fallback gave up."""
+            return StockDataProviderError(
+                f"AKShare request failed for {stock_code}: {cause} "
+                f"(delayed-host fallback also failed: {reason})"
+            )
+
         market = "1" if stock_code.startswith("6") else "0"
         try:
             response = requests.get(
@@ -327,23 +340,27 @@ class AKShareStockProvider(StockDataProvider):
                 timeout=self.fallback_timeout_seconds,
             )
             if response.status_code != 200:
-                raise failure
+                raise build_failure(f"HTTP {response.status_code}")
             payload = response.json()
         except StockDataProviderError:
             raise
         except Exception as exc:
-            raise failure from exc
+            raise build_failure(f"{type(exc).__name__}: {exc}") from exc
 
         if not isinstance(payload, dict) or payload.get("rc", 0) != 0:
-            raise failure
+            raise build_failure(
+                f"rc={payload.get('rc') if isinstance(payload, dict) else 'n/a'}"
+            )
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise failure
+            raise build_failure("payload.data is not an object")
         klines = data.get("klines")
         if not isinstance(klines, list) or not klines:
             # A data-source failure must surface as 50001, never be masked as
             # "empty history" (which StockService would turn into 40003).
-            raise failure
+            raise build_failure(
+                "upstream returned no klines (empty or rate-limited payload)"
+            )
         rows = []
         for line in klines:
             parts = str(line).split(",")

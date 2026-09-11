@@ -394,3 +394,52 @@ def test_background_workers_are_capped(monkeypatch):
 
     assert AKShareStockProvider._active_workers == 0
 
+
+def test_kline_error_reports_the_fallback_reason(monkeypatch):
+    """An empty delayed-host payload must not be reported as the primary error."""
+    import requests
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+
+    def hist(**kwargs):
+        raise ConnectionError("primary host unreachable")
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_hist=hist))
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with({"rc": 0, "data": {"dktotal": 0, "klines": []}}),
+    )
+
+    with pytest.raises(StockDataProviderError) as excinfo:
+        AKShareStockProvider().get_daily_kline("600519", date(2025, 1, 1), date(2025, 1, 5))
+
+    message = str(excinfo.value)
+    assert "primary host unreachable" in message  # the primary cause is kept
+    assert "delayed-host fallback also failed" in message  # ... and the real reason
+    assert "no klines" in message
+
+
+def test_stock_info_error_reports_the_fallback_reason(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+
+    def info(**kwargs):
+        raise ConnectionError("primary host unreachable")
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_individual_info_em=info))
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with({"rc": -1, "data": {"error": "throttled"}}),
+    )
+
+    with pytest.raises(StockDataProviderError) as excinfo:
+        AKShareStockProvider().get_stock_info("600519")
+
+    message = str(excinfo.value)
+    assert "primary host unreachable" in message
+    assert "delayed-host fallback also failed" in message
+    assert "rc=-1" in message
+

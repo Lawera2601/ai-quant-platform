@@ -55,9 +55,43 @@ $env:PYTHONIOENCODING='utf-8'
 - **实测限制（重要）**：延迟主机对**长历史区间**有限制（长区间 kline 常返回空）；且**高频访问后被 eastmoney 限流**（随后各主机均可能返回空或断连）。故实时链路仍可能 `50001`，**建议低频、少量重试**，不要持续密集探测。
 - 未改数据源字段口径与错误码；数据源错误一律 `50001`、不伪装为空数据；冻结链路完全不受影响。
 
+## 3.3 主机可达性实测（本机直连、无代理）
+
+同一时段对各家主机各发一次请求（间隔 1.5s，低频）的结果：
+
+| 主机 / 端点 | 结果 | 说明 |
+|---|---|---|
+| `push2his.eastmoney.com` `/api/qt/stock/kline/get` | ❌ 0.5s `RemoteDisconnected` | 实时行情主站被**网络层重置**（不是 502、也不是超时） |
+| `push2.eastmoney.com` `/api/qt/clist/get` | ❌ 0.5s `RemoteDisconnected` | 同上 |
+| `82.push2.eastmoney.com` `/api/qt/clist/get` | ❌ 0.5s `RemoteDisconnected` | 同上 |
+| `push2delay.eastmoney.com` `/api/qt/stock/get` | ✅ HTTP 200 | 股票信息回退**有效**（`GET /stocks/{code}` 由 50001 恢复为 200） |
+| `push2delay.eastmoney.com` `/api/qt/clist/get` | ✅ HTTP 200，`total=5913` | 但 `pz` 被硬限制为 **100 行/页**（`pz=6000` 仍只返回 100） |
+| `push2delay.eastmoney.com` `/api/qt/stock/kline/get` | ⚠️ HTTP 200 但 `rc=0`、`dktotal=0`、`klines=[]` | **同一组请求参数早些时候曾返回 23 行**，之后一律返回空 → 限流特征 |
+| `datacenter-web.eastmoney.com` | ✅ HTTP 200 | — |
+| `search-api-web.eastmoney.com`（新闻） | ✅ HTTP 200 | 新闻链路正常（0.4s，5 条） |
+
+结论：
+
+1. 被阻断的**只有实时行情集群**（`push2` / `push2his` / `82.push2`），表现是握手后立即 `RemoteDisconnected`；与代理无关（实测 `HTTP_PROXY`/`HTTPS_PROXY` 均为空）。
+2. 因此当前：`get_stock_info` **可用**（走延迟主机）；`get_daily_kline` 走延迟主机被限流返回空 → 按契约抛 `50001`（**不会**伪装成 40003 空数据）。
+3. 搜索仍如实 `50001`：延迟主机单页 100 行、全表 5913 行需 60 页，不适合做在线搜索回退（会拖垮响应时间或给出误导性结果）。
+4. 判定方法：`ut` 令牌、`beg/end` 区间形式、`lmt` 参数均已逐一排除——**带与不带 `ut` 结果相同**，故不是参数问题，是上游对该来源的限流/阻断。
+
+### 错误信息可诊断性（本次修正）
+
+回退失败时，异常消息现在**同时**给出主站原因与回退放弃原因，例如：
+
+```
+AKShare request failed for 600519: ('Connection aborted.', RemoteDisconnected(...))
+  (delayed-host fallback also failed: upstream returned no klines (empty or rate-limited payload))
+```
+
+此前只重复主站原因，会把「**回退被限流返回空**」误判为「主站网络故障」，导致排查方向错误（本次即被此掩盖过一次）。
+
 ## 4. 不含凭据的配置建议
 
-- **优先**：确认本地代理（Clash `127.0.0.1:7892`）正常运行，且对其规则/节点到 `*.eastmoney.com`、`*.sina.com.cn` 稳定；`push2*` 与 `search-api-web` 需分别可用。
+- **优先**：确认本地代理（曾用 Clash `127.0.0.1:7892`）是否运行，且其规则/节点到 `*.eastmoney.com`、`*.sina.com.cn` 稳定；`push2*` 与 `search-api-web` 需分别可用。
+  - 注意：代理关闭时本机 `HTTP_PROXY`/`HTTPS_PROXY` 为空，此时 `push2*` 仍被 `RemoteDisconnected` 阻断（见 3.3），故**不要**把问题归因于代理。
 - 若存在**直连可用**的通路，可对这两个域**绕过代理**（`NO_PROXY=eastmoney.com,sina.com.cn`）；本环境实测直连同样失败，需按实际网络确认。
 - **重试**：这两类失败为间歇性；Provider 现已内置有限重试 + 同源延迟主机回退（见 3.2）。
 - **不要**把数据源错误降级为空数据；B 保持 `50001`。

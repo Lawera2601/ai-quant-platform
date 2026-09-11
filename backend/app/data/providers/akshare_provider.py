@@ -121,8 +121,6 @@ class AKShareStockProvider(StockDataProvider):
             raw = self._call_with_retry(lambda: ak.stock_zh_a_spot_em())
         except StockDataProviderError:
             raise
-        except _TRANSIENT_ERRORS as exc:
-            raw = self._spot_frame_from_delay_host(exc)
         except Exception as exc:
             raise StockDataProviderError(f"AKShare spot request failed: {exc}") from exc
 
@@ -259,8 +257,10 @@ class AKShareStockProvider(StockDataProvider):
 
         klines = data.get("klines") or []
         if not klines:
-            raise EmptyStockDataError(
-                f"delayed host returned no daily kline for {stock_code}"
+            # A data-source failure must surface as 50001, never be masked as
+            # "empty history" (which StockService would turn into 40003).
+            raise StockDataProviderError(
+                f"AKShare request failed for {stock_code}: {cause}"
             )
         rows = []
         for line in klines:
@@ -285,42 +285,6 @@ class AKShareStockProvider(StockDataProvider):
                 f"delayed host daily kline rows are malformed for {stock_code}"
             )
         return self._normalize_daily_kline(pd.DataFrame(rows), stock_code)
-
-    def _spot_frame_from_delay_host(self, cause: Exception) -> pd.DataFrame:
-        """Fallback A-share spot list (code/name) from the same-source delayed host."""
-        import requests
-
-        try:
-            response = requests.get(
-                self.delayed_base_url + "/api/qt/clist/get",
-                params={
-                    "pn": "1",
-                    "pz": "6000",
-                    "po": "1",
-                    "np": "1",
-                    "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                    "fltt": "2",
-                    "invt": "2",
-                    "fid": "f12",
-                    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-                    "fields": "f12,f14",
-                },
-                timeout=25,
-            )
-            diff = (response.json() or {}).get("data", {}).get("diff") or []
-        except Exception as exc:
-            raise StockDataProviderError(f"AKShare spot request failed: {cause}") from exc
-
-        if isinstance(diff, dict):
-            diff = list(diff.values())
-        rows = [
-            {"代码": str(item.get("f12")), "名称": item.get("f14")}
-            for item in diff
-            if item.get("f12") and item.get("f14")
-        ]
-        if not rows:
-            raise StockDataSchemaError("delayed host spot response is empty")
-        return pd.DataFrame(rows)
 
     def get_stock_news(self, stock_code: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Fetch recent East Money news for a stock and return normalized dicts.

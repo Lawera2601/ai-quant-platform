@@ -148,31 +148,3 @@ def test_kline_falls_back_to_delayed_host(monkeypatch):
     assert list(frame["trade_date"]) == [date(2025, 1, 2), date(2025, 1, 3)]
     assert list(frame["close"]) == [105.0, 106.0]
 
-
-def test_search_falls_back_to_delayed_host(monkeypatch):
-    import requests
-
-    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
-
-    def spot(**kwargs):
-        raise ConnectionError("connection reset")
-
-    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_spot_em=spot))
-
-    class _Response:
-        def json(self):
-            return {
-                "data": {
-                    "diff": [
-                        {"f12": "600519", "f14": "贵州茅台"},
-                        {"f12": "000001", "f14": "平安银行"},
-                    ]
-                }
-            }
-
-    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: _Response())
-
-    result = AKShareStockProvider().search_stocks("茅台")
-
-    assert result == [{"stock_code": "600519", "stock_name": "贵州茅台"}]
-

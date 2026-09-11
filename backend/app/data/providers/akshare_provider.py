@@ -69,9 +69,24 @@ class AKShareStockProvider(StockDataProvider):
     #: Same-source delayed-quote host used only as a fallback when the primary
     #: eastmoney hosts fail after retries (identical endpoints and field口径).
     delayed_base_url = "https://push2delay.eastmoney.com"
+    #: Cap on concurrently-running (possibly hung) background AKShare calls, so
+    #: repeated timeouts cannot accumulate unbounded daemon threads.
+    max_background_workers = 4
+    _worker_lock = threading.Lock()
+    _active_workers = 0
 
     def _call_with_timeout(self, call, timeout):
-        """Run ``call`` in a daemon thread, raising if it exceeds ``timeout`` seconds."""
+        """Run ``call`` in a bounded daemon thread, raising if it exceeds ``timeout``.
+
+        A daemon thread cannot be cancelled, so the number of in-flight workers is
+        capped: once the cap is reached new calls fail fast instead of piling up
+        more hung threads.
+        """
+        cls = AKShareStockProvider
+        with cls._worker_lock:
+            if cls._active_workers >= self.max_background_workers:
+                raise TimeoutError("too many in-flight AKShare calls")
+            cls._active_workers += 1
         box = {}
 
         def worker():
@@ -79,6 +94,9 @@ class AKShareStockProvider(StockDataProvider):
                 box["value"] = call()
             except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
                 box["error"] = exc
+            finally:
+                with cls._worker_lock:
+                    cls._active_workers -= 1
 
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
@@ -227,8 +245,9 @@ class AKShareStockProvider(StockDataProvider):
 
         Used only when the primary ``push2`` host fails after retries; the field
         mapping (``f57/f58/f116/f117/f127``) is identical to
-        ``stock_individual_info_em``. Response structure, business status (``rc``)
-        and required fields are validated; any anomaly maps to 50001.
+        ``stock_individual_info_em``. HTTP status, response structure, business
+        status (``rc``), field types and stock identity are all validated; any
+        anomaly maps to 50001.
         """
         import requests
 
@@ -247,7 +266,11 @@ class AKShareStockProvider(StockDataProvider):
                 },
                 timeout=self.fallback_timeout_seconds,
             )
+            if response.status_code != 200:
+                raise failure
             payload = response.json()
+        except StockDataProviderError:
+            raise
         except Exception as exc:
             raise failure from exc
 
@@ -256,13 +279,19 @@ class AKShareStockProvider(StockDataProvider):
         data = payload.get("data")
         if not isinstance(data, dict):
             raise failure
-        code = self._cell_text(data.get("f57"))
-        name = self._cell_text(data.get("f58"))
-        if not code or not name:
+        f57 = data.get("f57")
+        f58 = data.get("f58")
+        if isinstance(f57, bool) or not isinstance(f57, (str, int)):
+            raise failure
+        if not isinstance(f58, str) or not f58.strip():
+            raise failure
+        code = str(f57).strip().zfill(6)
+        if code != stock_code:
+            # Never return a different stock's identity.
             raise failure
         return {
             "stock_code": code,
-            "stock_name": name,
+            "stock_name": f58.strip(),
             "industry": self._cell_text(data.get("f127")),
             "total_market_cap": self._cell_float(data.get("f116")),
             "float_market_cap": self._cell_float(data.get("f117")),
@@ -297,7 +326,11 @@ class AKShareStockProvider(StockDataProvider):
                 },
                 timeout=self.fallback_timeout_seconds,
             )
+            if response.status_code != 200:
+                raise failure
             payload = response.json()
+        except StockDataProviderError:
+            raise
         except Exception as exc:
             raise failure from exc
 
@@ -414,14 +447,24 @@ class AKShareStockProvider(StockDataProvider):
 
     @staticmethod
     def _cell_text(value: Any) -> Any:
-        if value is None or pd.isna(value):
+        if value is None or isinstance(value, (list, tuple, set, dict)):
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
             return None
         text = str(value).strip()
         return text or None
 
     @staticmethod
     def _cell_float(value: Any) -> Any:
-        if value is None or pd.isna(value):
+        if value is None or isinstance(value, (list, tuple, set, dict)):
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
             return None
         try:
             number = float(value)

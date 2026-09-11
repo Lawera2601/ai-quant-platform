@@ -89,6 +89,8 @@ def test_stock_info_falls_back_to_delayed_host(monkeypatch):
     monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_individual_info_em=info))
 
     class _Response:
+        status_code = 200
+
         def json(self):
             return {
                 "data": {
@@ -140,6 +142,8 @@ def test_kline_falls_back_to_delayed_host(monkeypatch):
     monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_hist=hist))
 
     class _Response:
+        status_code = 200
+
         def json(self):
             return {
                 "data": {
@@ -186,12 +190,15 @@ def test_call_budget_returns_quickly_when_upstream_hangs(monkeypatch):
     assert elapsed < 2.0  # bounded, must not hang for the full retry budget chain
 
 
-def _response_with(payload):
+def _response_with(payload, status_code=200):
     class _Response:
+        def __init__(self, code):
+            self.status_code = code
+
         def json(self):
             return payload
 
-    return _Response()
+    return _Response(status_code)
 
 
 def test_stock_info_fallback_rejects_non_dict_data(monkeypatch):
@@ -261,4 +268,129 @@ def test_kline_fallback_rejects_malformed_row(monkeypatch):
 
     with pytest.raises(StockDataSchemaError):
         AKShareStockProvider().get_daily_kline("600519", date(2025, 1, 1), date(2025, 1, 5))
+
+
+def _primed_info_provider(monkeypatch):
+    def info(**kwargs):
+        raise ConnectionError("connection reset")
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_individual_info_em=info))
+
+
+def test_stock_info_fallback_rejects_non_string_fields(monkeypatch):
+    import requests
+
+    _primed_info_provider(monkeypatch)
+
+    # f58 as a list must not raise a bare 500; it must map to 50001.
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with({"rc": 0, "data": {"f57": "600519", "f58": ["A", "B"]}}),
+    )
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_stock_info("600519")
+
+    # f57 as a list must map to 50001 too.
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with({"rc": 0, "data": {"f57": ["600519"], "f58": "贵州茅台"}}),
+    )
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_stock_info("600519")
+
+
+def test_stock_info_fallback_rejects_mismatched_stock_code(monkeypatch):
+    import requests
+
+    _primed_info_provider(monkeypatch)
+
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with({"rc": 0, "data": {"f57": "000001", "f58": "平安银行"}}),
+    )
+
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_stock_info("600519")
+
+
+def test_fallbacks_reject_non_200_status(monkeypatch):
+    import requests
+
+    _primed_info_provider(monkeypatch)
+    # stock info: HTTP 503 with a valid-looking body must still fail.
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with(
+            {"rc": 0, "data": {"f57": "600519", "f58": "贵州茅台"}}, status_code=503
+        ),
+    )
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_stock_info("600519")
+
+    # kline: HTTP 503 with valid-looking klines must still fail.
+    def hist(**kwargs):
+        raise ConnectionError("connection reset")
+
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_hist=hist))
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: _response_with(
+            {"rc": 0, "data": {"klines": ["2025-01-02,100.0,105.0,110.0,90.0,1000,1,0,0.5,0.5,1.0"]}},
+            status_code=503,
+        ),
+    )
+    with pytest.raises(StockDataProviderError):
+        AKShareStockProvider().get_daily_kline("600519", date(2025, 1, 1), date(2025, 1, 5))
+
+
+def test_background_workers_are_capped(monkeypatch):
+    import threading
+    import time as _time
+
+    import requests
+
+    release = threading.Event()
+    monkeypatch.setattr(AKShareStockProvider, "call_timeout_seconds", 0.05)
+    monkeypatch.setattr(AKShareStockProvider, "retry_total_budget_seconds", 5)
+    monkeypatch.setattr(AKShareStockProvider, "retry_delay_seconds", 0)
+    monkeypatch.setattr(AKShareStockProvider, "retry_attempts", 1)
+    monkeypatch.setattr(AKShareStockProvider, "max_background_workers", 2)
+    AKShareStockProvider._active_workers = 0
+
+    def hanging(**kwargs):
+        release.wait(timeout=5)
+        return _kline_frame()
+
+    monkeypatch.setitem(sys.modules, "akshare", _fake_akshare(stock_zh_a_hist=hanging))
+
+    def failing_get(*args, **kwargs):
+        raise ConnectionError("fallback down")
+
+    monkeypatch.setattr(requests, "get", failing_get)
+
+    seen = []
+    try:
+        for _ in range(5):
+            try:
+                AKShareStockProvider().get_daily_kline("600519", date(2025, 1, 1), date(2025, 1, 5))
+            except StockDataProviderError:
+                pass
+            seen.append(AKShareStockProvider._active_workers)
+        assert max(seen) <= 2  # never exceeds the cap
+        assert seen[-1] == 2  # capped: no further hung workers spawned
+    finally:
+        release.set()
+        for _ in range(100):
+            if AKShareStockProvider._active_workers == 0:
+                break
+            _time.sleep(0.05)
+
+    assert AKShareStockProvider._active_workers == 0
 
